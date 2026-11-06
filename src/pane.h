@@ -18,7 +18,7 @@ struct FEntry {
     UBYTE kind;                      /* EK_... */
     UBYTE sel;
     UBYTE sized;                     /* drawer whose size has been worked out (Size) */
-    UBYTE spare;
+    UBYTE spare;                     /* file type + 1 once looked at (0: not yet) */
     LONG  aux;                       /* search results: offset of its drawer in pool, -1: none */
 };
 

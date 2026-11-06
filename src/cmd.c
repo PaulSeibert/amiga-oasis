@@ -12,6 +12,10 @@
 #include "match.h"
 #include "pane.h"
 #include "prefs.h"
+#include "ftype.h"
+#include "view.h"
+#include "ilbm.h"
+#include "svx.h"
 #include "cmd.h"
 
 static void out(const char *s)
@@ -422,6 +426,100 @@ static int button(char **argv, int argc)
     return r;
 }
 
+/* ---- viewers ----------------------------------------------------------------------------- */
+
+static int types(char **args, int n)
+{
+    char line[PATHMAX + 32];
+    int i;
+    for (i = 0; i < n; i++) {
+        int t = ft_file(args[i]);
+        fmt(line, "%s: %s\n", args[i], t == FT_UNKNOWN ? "(cannot read)" : ft_name(t));
+        out(line);
+    }
+    return 0;
+}
+
+static int lines(const char *path, const char *cols, const char *show)
+{
+    int c = 0, s = 0;
+    for (; *cols >= '0' && *cols <= '9'; cols++)
+        c = c * 10 + *cols - '0';
+    for (; *show >= '0' && *show <= '9'; show++)
+        s = s * 10 + *show - '0';
+    return single(view_lines(path, c < 8 ? 8 : c, s, out), "cannot read", path);
+}
+
+/* ILBM <file>: what Oasis makes of a picture, and a checksum of its decoded planes */
+static int ilbm(const char *path)
+{
+    static struct IlbmInfo ii;
+    UBYTE *buf, *planes[8], *mem = NULL;
+    LONG len, size, alloc, err, psize = 0;
+    const char *msg;
+    char line[160];
+    ULONG modes = 0, h = 0;
+    int sw = 0, sh = 0, depth = 0, rb, p, i;
+    if (!(buf = ft_load(path, 0x7FFFFFFF, 0, &len, &size, &alloc, &err)))
+        return single(err, "cannot read", path);
+    if ((msg = ilbm_parse(buf, len, &ii))) {
+        fmt(line, "oasis: %s\n", msg);
+        out(line);
+        FreeMem(buf, alloc);
+        return 10;
+    }
+    msg = ilbm_mode(&ii, &modes, &sw, &sh, &depth);
+    fmt(line, "%ld x %ld, %ld planes, masking %ld, compression %ld, CAMG $%lx%s, %ld colours\n",
+        (LONG)ii.w, (LONG)ii.h, (LONG)ii.planes, (LONG)ii.masking, (LONG)ii.compression,
+        ii.camg, ii.hascamg ? "" : " (none)", (LONG)ii.ncolors);
+    out(line);
+    if (msg)
+        fmt(line, "screen: cannot show (%s)\n", msg);
+    else
+        fmt(line, "screen: %ld x %ld x %ld, modes $%lx\n", (LONG)sw, (LONG)sh, (LONG)depth, modes);
+    out(line);
+    rb = ((ii.w + 15) >> 4) * 2;
+    psize = (LONG)rb * ii.h;
+    if (ii.planes <= 8 && (mem = AllocMem(psize * ii.planes, MEMF_PUBLIC | MEMF_CLEAR))) {
+        BOOL whole;
+        for (p = 0; p < ii.planes; p++)
+            planes[p] = mem + p * psize;
+        whole = ilbm_decode(&ii, planes, ii.planes, rb, ii.h);
+        for (i = 0; i < psize * ii.planes; i++)
+            h = h * 31 + mem[i];
+        fmt(line, "planes checksum %lx%s\n", h, whole ? "" : " (the data ran out)");
+        out(line);
+        FreeMem(mem, psize * ii.planes);
+    } else
+        out("oasis: not enough memory to decode the picture\n");
+    FreeMem(buf, alloc);
+    return 0;
+}
+
+static int play(const char *path)
+{
+    struct SvxInfo si = { 0 };
+    LONG ticks;
+    char line[160];
+    const char *msg = svx_play(path, NULL, NULL, 0, &si, &ticks);
+    if (msg && !si.rate) {
+        fmt(line, "oasis: %s\n", msg);
+        out(line);
+        return 10;
+    }
+    fmt(line, "%ld Hz, %ld samples%s, compression %ld, volume %ld, octaves %ld\n", (LONG)si.rate,
+        si.samples, si.stereo ? " (stereo)" : "", (LONG)si.compression, si.volume, (LONG)si.octaves);
+    out(line);
+    if (msg) {
+        fmt(line, "oasis: %s\n", msg);
+        out(line);
+        return 10;
+    }
+    fmt(line, "played in %ld ticks\n", ticks);
+    out(line);
+    return 0;
+}
+
 int cmd_run(int argc, char **argv)
 {
     int i;
@@ -486,6 +584,14 @@ int cmd_run(int argc, char **argv)
         return prefs(argv[3]);
     if (argc >= 7 && is(argv[2], "BUTTON"))
         return button(argv, argc);
+    if (argc >= 4 && is(argv[2], "TYPE"))
+        return types(argv + 3, argc - 3);
+    if (argc == 6 && is(argv[2], "LINES"))
+        return lines(argv[3], argv[4], argv[5]);
+    if (argc == 4 && is(argv[2], "ILBM"))
+        return ilbm(argv[3]);
+    if (argc == 4 && is(argv[2], "PLAY"))
+        return play(argv[3]);
     out("Oasis command mode. Usage:\n"
         "  oasis CMD LIST <drawer>             list a drawer (name, size, protection, date, comment)\n"
         "  oasis CMD TREE <drawer>             list everything below a drawer, sorted\n"
@@ -503,6 +609,10 @@ int cmd_run(int argc, char **argv)
         "  oasis CMD MATCH <pattern> <name>... try a pattern\n"
         "  oasis CMD PREFS <file>              check a prefs file\n"
         "  oasis CMD BUTTON <prefs> <n> <src> <dst> [file...]   run custom button n\n"
+        "  oasis CMD TYPE <file>...            what each file is\n"
+        "  oasis CMD LINES <file> <cols> <n>   how the text viewer shows a file\n"
+        "  oasis CMD ILBM <file>               check a picture\n"
+        "  oasis CMD PLAY <file>               play an 8SVX sound\n"
         "  oasis CMD MEM                       free memory\n");
     return 5;
 }

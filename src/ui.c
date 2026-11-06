@@ -26,6 +26,10 @@
 #include "req.h"
 #include "tools.h"
 #include "prefs.h"
+#include "ftype.h"
+#include "view.h"
+#include "ilbm.h"
+#include "svx.h"
 #include "ui.h"
 
 extern struct GfxBase *GfxBase;
@@ -96,6 +100,7 @@ static int clickPane = -1, clickRow = -1;
 
 static void fileop(int b);
 static void movecursor(int i, int k);
+static void viewentry(int i, int k, BOOL hex);
 static void toolop(int b);
 static void runbutton(int i);
 static void reloadprefs(void);
@@ -343,7 +348,7 @@ static void addgadgets(void)
     bw = (XR - X0 + 1 - 7 * BGAP) / 8;
     for (i = 0; i < NBANK; i++) {
         int r = i / 8, c = i % 8;
-        BOOL on = !(i == B_VIEW || i == B_HEX || i == B_LHA || i == B_ADF);  /* later milestones */
+        BOOL on = !(i == B_LHA || i == B_ADF);  /* later milestones */
         initbtn(&bank[i], GID_BANK + i, bankLabel[i], X0 + c * (bw + BGAP),
                 yBank + r * (BTN_H + BGAP), bw, TRUE, on);
         AddGadget(win, &bank[i].g, (UWORD)~0);
@@ -576,8 +581,18 @@ static void drawinfo(void)
                 else if (e->kind == EK_DIR)
                     fmt(line, "%s  drawer  %s  %s", nm, date, prot);
                 else {
+                    struct FEntry *fe = (struct FEntry *)e;
+                    if (!fe->spare) {               /* what it is: read once, then remembered */
+                        static char full[PATHMAX];
+                        pane_entrydir(p, e, full);
+                        path_add(full, e->name);
+                        fe->spare = (UBYTE)(ft_file(full) + 1);
+                    }
                     fmt(sz, "%ld", e->size);
-                    fmt(line, "%s  %s bytes  %s  %s", nm, sz, date, prot);
+                    if (fe->spare - 1 > FT_EMPTY)
+                        fmt(line, "%s  %s, %s bytes  %s  %s", nm, ft_name(fe->spare - 1), sz, date, prot);
+                    else                            /* unreadable or empty: just the size */
+                        fmt(line, "%s  %s bytes  %s  %s", nm, sz, date, prot);
                 }
                 if (comment[0]) {
                     scat(line, "  : ", sizeof(line));
@@ -717,7 +732,7 @@ static void open_entry(int i, int k)
         path_add(path, e->name);
         go(i, path);
     } else
-        message("Viewers arrive in a later test version of Oasis.");
+        viewentry(i, k, FALSE);
 }
 
 static void parent(int i)
@@ -1505,6 +1520,70 @@ done:
     }
 }
 
+/* ---- viewers --------------------------------------------------------------------------------- */
+
+static BOOL v_poll(void *ctx, LONG done, LONG total)
+{
+    BOOL stop = FALSE;
+    int barw = 160, bx = XR - barw + 1, w;
+    if (!job.resized) {
+        w = (int)((done >> 4) * (barw - 2) / ((total >> 4) ? (total >> 4) : 1));
+        if (w > barw - 2)
+            w = barw - 2;
+        box(bx, yInfo, XR, yInfo + 7, FG);
+        fill(bx + 1, yInfo + 1, bx + w, yInfo + 6, HI);
+        fill(bx + 1 + w, yInfo + 1, XR - 1, yInfo + 6, BG);
+    }
+    flushinput(&stop);
+    return !stop;
+}
+
+/* look at the file at row k of pane i: a picture, a sound, text, or (hex, or anything else) hex */
+static void viewentry(int i, int k, BOOL hex)
+{
+    static char full[PATHMAX], line[96];
+    struct Pane *p = &pane[i];
+    struct FEntry *e = &p->e[k];
+    const char *msg = NULL;
+    int t, n = (XR - X0 + 1) / 8;
+    pane_entrydir(p, e, full);
+    path_add(full, e->name);
+    t = ft_file(full);
+    e->spare = (UBYTE)(t + 1);
+    if (!hex && t == FT_ILBM)
+        msg = ilbm_show(full);
+    else if (!hex && t == FT_8SVX) {
+        struct SvxInfo si;
+        LONG ticks;
+        fmt(line, "Playing %s   (Esc stops)", e->name);
+        textpad(X0, yInfo, HI, BG, line, n - 21);
+        msg = svx_play(full, v_poll, NULL, ui_sigmask(), &si, &ticks);
+        if (!msg) {
+            LONG tenths = (si.samples * 10 + (LONG)si.rate / 2) / (LONG)si.rate;
+            fmt(line, "Played %s: %ld.%ld seconds, %ld Hz%s.", e->name, tenths / 10, tenths % 10,
+                (LONG)si.rate, si.stereo ? ", stereo" : "");
+            msg = line;
+        }
+    } else {
+        LONG err = view_file(win, &topaz8, full, hex || !(t == FT_TEXT || t == FT_EMPTY));
+        if (err) {
+            fmt(line, "Cannot show %s: %s.", e->name, dos_errstr(err));
+            msg = line;
+        }
+    }
+    flushinput(NULL);
+    if (job.resized) {
+        job.resized = FALSE;
+        resized();
+    }
+    if (msg)
+        message(msg);
+    else {
+        infoIsMsg = FALSE;
+        drawinfo();
+    }
+}
+
 /* ---- custom buttons (S:Oasis.prefs) ----------------------------------------------------------- */
 
 static void runbutton(int i)
@@ -1675,6 +1754,13 @@ static void gadgetup(struct Gadget *g)
             fileop(b);
         else if (b <= B_SIZE || b == B_SEARCH || b == B_COMPARE)
             toolop(b);
+        else if (b == B_VIEW || b == B_HEX) {
+            struct Pane *p = &pane[active];
+            if (p->devlist || p->cur < 0 || p->cur >= p->count || p->e[p->cur].kind != EK_FILE)
+                message("Put the cursor on a file to look at it.");
+            else
+                viewentry(active, p->cur, b == B_HEX);
+        }
         else if (b == B_ALL)
             selectall(TRUE);
         else if (b == B_NONE)
@@ -1791,7 +1877,22 @@ BOOL ui_open(const char *left, const char *right)
             loadpane(0);
         } else if (TEST_REQ == 6)        /* compare the two panes */
             compareop();
-        else
+        else if (TEST_REQ >= 7 && TEST_REQ <= 13) {   /* the viewers */
+            static const char *const f[] = { "Work:vt/readme.txt", "Work:vt/readme.txt",
+                "Work:vt/lores32.iff", "Work:vt/ham.iff", "Work:vt/ehb.iff", "Work:vt/hires16.iff",
+                "Work:vt/masked.iff" };
+            if (TEST_REQ <= 8)
+                view_file(win, &topaz8, f[TEST_REQ - 7], TEST_REQ == 8);
+            else
+                ilbm_show(f[TEST_REQ - 7]);
+        } else if (TEST_REQ == 14) {     /* play a sound from the window, as a double-click does */
+            int k;
+            for (k = 0; k < pane[0].count; k++)
+                if (!nocase_cmp(pane[0].e[k].name, "tone.8svx")) {
+                    movecursor(0, k);
+                    viewentry(0, k, FALSE);
+                }
+        } else
             req_choose(win, &topaz8, "Delete", "Delete 4 files and 1 drawer from\nWork:ot/src ?\n\n"
                        "Drawers are deleted with everything in them.", "Delete|Cancel");
     }

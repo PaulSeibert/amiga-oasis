@@ -123,6 +123,7 @@ BOOL pane_read(struct Pane *p, int sort, BOOL hideinfo)
             e->prot = fib->fib_Protection;
             e->sel = 0;
             e->sized = 0;
+            e->spare = 0;
             e->aux = -1;
             if (fib->fib_DirEntryType > 0) {
                 e->kind = EK_DIR;
@@ -168,6 +169,7 @@ void pane_devlist(struct Pane *p)
         e->prot = 0;
         e->sel = 0;
         e->sized = 0;
+        e->spare = 0;
         e->aux = -1;
         e->date.ds_Days = e->date.ds_Minute = e->date.ds_Tick = 0;
     }
@@ -237,7 +239,7 @@ BOOL pane_addhit(struct Pane *p, const char *reldir, const struct FileInfoBlock 
     scopy(e->name, (char *)fib->fib_FileName, FNAME);
     e->date = fib->fib_Date;
     e->prot = fib->fib_Protection;
-    e->sel = e->sized = 0;
+    e->sel = e->sized = e->spare = 0;
     e->aux = -1;
     if (fib->fib_DirEntryType > 0) {
         e->kind = EK_DIR;

@@ -2,16 +2,21 @@
 # Oasis window test disk for screenshots: testgui.sh [N]
 #   N = 0 (default) the window with custom buttons from S:Oasis.prefs, on Work:tt/a and Work:tt/b
 #   N = 4 the Protect dialog, 5 search results ("#?.txt" below Work:tt), 6 Compare of the panes
-# Needs the Work:tt fixtures from testtools.sh. Writes $OASIS_PLAY/oasis-gui.adf and the presets
+#   N = 7 text viewer, 8 hex viewer, 9-13 pictures (lores 32 colours, HAM, EHB, hires, masked)
+#   N = v the window on Work:vt (file types in the info line)
+# Needs the Work:tt fixtures from testtools.sh (and Work:vt from testview.sh for 7-13 and v).
+# Writes $OASIS_PLAY/oasis-gui.adf and the presets
 # oasis-gui-ks13.uae / -ks31.uae. Afterwards ./build.sh restores the normal build.
 # Borrows C:Run from the Workbench 1.3 disk ($WB13_ADF): a local test disk, never distribute it.
 set -euo pipefail
 cd "$(dirname "$0")"
 N=${1:-0}
 WB13_ADF=${WB13_ADF:-"/mnt/j/amiga/disks/Workbench v1.3.3 rev 34.34 (1990)(Commodore)(A500-A2000)(Disk 1 of 2)(Workbench).adf"}
-if [ "$N" = 0 ]; then OASIS_CFLAGS= ./build.sh >/dev/null; else OASIS_CFLAGS="-DTEST_REQ=$N" ./build.sh >/dev/null; fi
+if [ "$N" = 0 ] || [ "$N" = v ]; then OASIS_CFLAGS= ./build.sh >/dev/null
+else OASIS_CFLAGS="-DTEST_REQ=$N" ./build.sh >/dev/null; fi
 case "$N" in
   5) start='oasis Work:tt Work:tt/b' ;;
+  v|7|8|9|1[0-4]) start='oasis Work:vt Work:tt/b' ;;
   *) start='oasis Work:tt/a Work:tt/b' ;;
 esac
 printf '%s\n' "$start" > build/gui-startup
