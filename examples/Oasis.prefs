@@ -21,3 +21,11 @@ BUTTON "Notepad" QUIET Run SYS:Utilities/NotePad %f
 BUTTON "List" List %p
 BUTTON "Disks" Info
 BUTTON "Memory" Avail
+;
+; LhA archives. Oasis lists them by itself; extracting and packing run the LhA program
+; (shareware, not included). It is looked for as C:LhA unless named here:
+;LHA "Work:Tools/LhA"
+; The command lines, if your LhA needs others (%l LhA, %a archive, %d destination drawer,
+; %n the names to pack, relative to the source drawer):
+;LHAEXTRACT %l x %a %d
+;LHAPACK %l -r a %a %n

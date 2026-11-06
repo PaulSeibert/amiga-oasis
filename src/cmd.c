@@ -16,6 +16,7 @@
 #include "view.h"
 #include "ilbm.h"
 #include "svx.h"
+#include "lha.h"
 #include "cmd.h"
 
 static void out(const char *s)
@@ -386,6 +387,9 @@ static int prefs(const char *file)
             P.b[i].cmd);
         out(line);
     }
+    if (P.lha[0]) { fmt(line, "LHA \"%s\"\n", P.lha); out(line); }
+    if (P.lhaextract[0]) { fmt(line, "LHAEXTRACT [%s]\n", P.lhaextract); out(line); }
+    if (P.lhapack[0]) { fmt(line, "LHAPACK [%s]\n", P.lhapack); out(line); }
     if (P.nbad) {
         fmt(line, "Not understood: %ld line%s, the first is line %ld.\n", (LONG)P.nbad,
             P.nbad == 1 ? "" : "s", (LONG)P.badline);
@@ -520,6 +524,96 @@ static int play(const char *path)
     return 0;
 }
 
+/* ---- LhA ---------------------------------------------------------------------------------- */
+
+static int lhalist(const char *path)
+{
+    struct LhaStats st;
+    char *text;
+    LONG len, alloc, err = lha_list(path, &text, &len, &alloc, &st);
+    if (err)
+        return single(err, "cannot list", path);
+    Write(Output(), text, len);
+    FreeMem(text, alloc);
+    return 0;
+}
+
+/* run one command line (with its newline) in drawer dir, showing it first */
+static int runin(const char *cmd, const char *dir)
+{
+    BPTR l, old;
+    int r;
+    out("> ");
+    out(cmd);
+    if (!(l = Lock((STRPTR)dir, ACCESS_READ)))
+        return single(IoErr(), "cannot open", dir);
+    old = CurrentDir(l);
+    r = Execute((STRPTR)cmd, 0, Output()) ? 0 : 10;
+    CurrentDir(old);
+    UnLock(l);
+    if (r)
+        out("oasis: could not run the command (Execute failed)\n");
+    return r;
+}
+
+static int lhax(const char *archive, const char *dest)
+{
+    static char prog[PATHMAX], cmd[LHA_CMDMAX];
+    if (!lha_program(NULL, prog, PATHMAX)) {
+        out("oasis: extracting needs the LhA program in C:\n");
+        return 10;
+    }
+    if (lha_command(LHA_EXTRACT, prog, archive, dest, NULL, 0, cmd, sizeof(cmd)))
+        return single(ERROR_LINE_TOO_LONG, "the command is too long for", archive);
+    return runin(cmd, dest);
+}
+
+/* LHAA <archive> <srcdrawer> <name>... | @listfile: names relative to srcdrawer (or one per
+   line in listfile: 1.3 command lines hold only 255 characters), in commands that fit 1.3 */
+#define MAXLIST 64
+static int lhaa(const char *archive, const char *src, char **names, int n)
+{
+    static char prog[PATHMAX], cmds[16][LHA_CMDMAX], list[MAXLIST][64], *lp[MAXLIST];
+    int c, i, rc = 0;
+    if (!lha_program(NULL, prog, PATHMAX)) {
+        out("oasis: packing needs the LhA program in C:\n");
+        return 10;
+    }
+    if (n == 1 && names[0][0] == '@') {
+        BPTR f = Open((STRPTR)names[0] + 1, MODE_OLDFILE);
+        char ch;
+        int k = 0;
+        if (!f)
+            return single(IoErr(), "cannot read", names[0] + 1);
+        n = 0;
+        while (n < MAXLIST && Read(f, &ch, 1) == 1) {   /* (small lists: one byte at a time is fine) */
+            if (ch == '\n' || ch == '\r') {
+                if (k) {
+                    list[n][k] = 0;
+                    lp[n] = list[n];
+                    n++;
+                    k = 0;
+                }
+            } else if (k < 63)
+                list[n][k++] = ch;
+        }
+        if (k && n < MAXLIST) {
+            list[n][k] = 0;
+            lp[n] = list[n];
+            n++;
+        }
+        Close(f);
+        names = lp;
+    }
+    if ((c = lha_packcmds(LHA_PACK, prog, archive, names, n, cmds, 16, 230)) < 0) {
+        out("oasis: too many names\n");
+        return 10;
+    }
+    for (i = 0; i < c && !rc; i++)
+        rc = runin(cmds[i], src);
+    return rc;
+}
+
 int cmd_run(int argc, char **argv)
 {
     int i;
@@ -592,6 +686,12 @@ int cmd_run(int argc, char **argv)
         return ilbm(argv[3]);
     if (argc == 4 && is(argv[2], "PLAY"))
         return play(argv[3]);
+    if (argc == 4 && is(argv[2], "LHALIST"))
+        return lhalist(argv[3]);
+    if (argc == 5 && is(argv[2], "LHAX"))
+        return lhax(argv[3], argv[4]);
+    if (argc >= 6 && is(argv[2], "LHAA"))
+        return lhaa(argv[3], argv[4], argv + 5, argc - 5);
     out("Oasis command mode. Usage:\n"
         "  oasis CMD LIST <drawer>             list a drawer (name, size, protection, date, comment)\n"
         "  oasis CMD TREE <drawer>             list everything below a drawer, sorted\n"
@@ -613,6 +713,9 @@ int cmd_run(int argc, char **argv)
         "  oasis CMD LINES <file> <cols> <n>   how the text viewer shows a file\n"
         "  oasis CMD ILBM <file>               check a picture\n"
         "  oasis CMD PLAY <file>               play an 8SVX sound\n"
+        "  oasis CMD LHALIST <archive>         what is in an LhA archive\n"
+        "  oasis CMD LHAX <archive> <drawer>   extract it there (runs C:LhA)\n"
+        "  oasis CMD LHAA <archive> <drawer> <name>... | @list   pack names from drawer (runs C:LhA)\n"
         "  oasis CMD MEM                       free memory\n");
     return 5;
 }

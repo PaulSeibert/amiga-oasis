@@ -17,6 +17,8 @@ else OASIS_CFLAGS="-DTEST_REQ=$N" ./build.sh >/dev/null; fi
 case "$N" in
   5) start='oasis Work:tt Work:tt/b' ;;
   v|7|8|9|1[0-4]) start='oasis Work:vt Work:tt/b' ;;
+  15|16|17) start='oasis Work:la Work:la/out' ;;
+  18) start='oasis Work:la/src Work:la/out' ;;
   *) start='oasis Work:tt/a Work:tt/b' ;;
 esac
 printf '%s\n' "$start" > build/gui-startup

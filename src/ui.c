@@ -30,6 +30,7 @@
 #include "view.h"
 #include "ilbm.h"
 #include "svx.h"
+#include "lha.h"
 #include "ui.h"
 
 extern struct GfxBase *GfxBase;
@@ -101,6 +102,8 @@ static int clickPane = -1, clickRow = -1;
 static void fileop(int b);
 static void movecursor(int i, int k);
 static void viewentry(int i, int k, BOOL hex);
+static void lhaview(const char *full, const char *name);
+static void lhaop(void);
 static void toolop(int b);
 static void runbutton(int i);
 static void reloadprefs(void);
@@ -348,7 +351,7 @@ static void addgadgets(void)
     bw = (XR - X0 + 1 - 7 * BGAP) / 8;
     for (i = 0; i < NBANK; i++) {
         int r = i / 8, c = i % 8;
-        BOOL on = !(i == B_LHA || i == B_ADF);  /* later milestones */
+        BOOL on = i != B_ADF;                    /* ADF imaging: milestone 6 */
         initbtn(&bank[i], GID_BANK + i, bankLabel[i], X0 + c * (bw + BGAP),
                 yBank + r * (BTN_H + BGAP), bw, TRUE, on);
         AddGadget(win, &bank[i].g, (UWORD)~0);
@@ -1550,6 +1553,10 @@ static void viewentry(int i, int k, BOOL hex)
     path_add(full, e->name);
     t = ft_file(full);
     e->spare = (UBYTE)(t + 1);
+    if (!hex && t == FT_LHA) {
+        lhaview(full, e->name);
+        return;
+    }
     if (!hex && t == FT_ILBM)
         msg = ilbm_show(full);
     else if (!hex && t == FT_8SVX) {
@@ -1586,15 +1593,69 @@ static void viewentry(int i, int k, BOOL hex)
 
 /* ---- custom buttons (S:Oasis.prefs) ----------------------------------------------------------- */
 
+/* run AmigaDOS command lines one after another, in curdir (NULL: Oasis's own), with their
+   output in a window that waits for Return (or nowhere, quiet); then read the panes again.
+   1 if they all ran, 0 if one couldn't be started, -1 if there was no output window. */
+static int runcmds(char **cmds, int n, const char *title, BOOL quiet, const char *curdir)
+{
+    static char con[96];
+    BPTR out, dir = 0, old = 0;
+    int ok = 1, i, k;
+    if (quiet)
+        out = Open((STRPTR)"NIL:", MODE_NEWFILE);
+    else {
+        struct Screen *scr = win->WScreen;
+        fmt(con, "CON:0/%ld/%ld/%ld/Oasis: %s", (LONG)(scr->Height > 200 ? 40 : 11),
+            (LONG)scr->Width, (LONG)(scr->Height > 200 ? 160 : 120), title);
+        out = Open((STRPTR)con, MODE_NEWFILE);
+    }
+    if (!out) {
+        message("Cannot open a window for the command's output.");
+        return -1;
+    }
+    message("Running the command...");
+    if (curdir && curdir[0] && (dir = Lock((STRPTR)curdir, ACCESS_READ)))
+        old = CurrentDir(dir);
+    for (i = 0; i < n && ok; i++) {
+        if (!quiet) {
+            Write(out, (APTR)"> ", 2);
+            Write(out, cmds[i], slen(cmds[i]));
+        }
+        ok = Execute((STRPTR)cmds[i], 0, out) ? 1 : 0;
+    }
+    if (dir) {
+        CurrentDir(old);
+        UnLock(dir);
+    }
+    if (!quiet) {
+        static const char bye[] = "\nPress Return to close this window. ";
+        static const char nogo[] = "Could not run the command (1.3 needs C:Run for this).\n";
+        char c;
+        if (!ok)
+            Write(out, (APTR)nogo, sizeof(nogo) - 1);
+        Write(out, (APTR)bye, sizeof(bye) - 1);
+        Read(out, &c, 1);
+    }
+    Close(out);
+    flushinput(NULL);
+    for (k = 0; k < 2; k++)            /* the commands may have changed files */
+        if (!pane[k].devlist)
+            reloadkeep(k);
+    if (job.resized) {
+        job.resized = FALSE;
+        resized();
+    }
+    return ok;
+}
+
 static void runbutton(int i)
 {
     static char cmd[1024], con[96];
+    char *cmdp = cmd;
     struct PrefButton *pb = &prefs.b[i];
     struct Pane *s = &pane[active], *d = &pane[1 - active];
     char **files = NULL, *paths = NULL;
-    int k, n = 0, r;
-    BPTR out, dir = 0, old = 0;
-    BOOL ok;
+    int k, n = 0, r, ok;
     if (!s->devlist)
         for (k = 0; k < s->count; k++)
             if (s->nsel ? s->e[k].sel : k == s->cur)
@@ -1624,52 +1685,255 @@ static void runbutton(int i)
         message(con);
         return;
     }
-    if (pb->quiet)
-        out = Open((STRPTR)"NIL:", MODE_NEWFILE);
-    else {
-        struct Screen *scr = win->WScreen;
-        fmt(con, "CON:0/%ld/%ld/%ld/Oasis: %s", (LONG)(scr->Height > 200 ? 40 : 11),
-            (LONG)scr->Width, (LONG)(scr->Height > 200 ? 160 : 120), pb->label);
-        out = Open((STRPTR)con, MODE_NEWFILE);
+    ok = runcmds(&cmdp, 1, pb->label, pb->quiet, s->devlist ? NULL : s->path);
+    if (ok >= 0) {
+        fmt(con, ok ? "Done: %s." : "Could not run \"%s\".", pb->label);
+        message(con);
     }
-    if (!out) {
-        message("Cannot open a window for the command's output.");
+}
+
+/* ---- LhA archives ------------------------------------------------------------------------------- */
+
+#define MAXPACK 40               /* pack commands for one selection (each up to ~230 characters) */
+
+static void lhaview(const char *full, const char *name)
+{
+    static char line[120];
+    struct LhaStats st;
+    char *text, a[16], b[16];
+    LONG len, alloc, err;
+    message("Reading the archive...");
+    if ((err = lha_list(full, &text, &len, &alloc, &st))) {
+        if (err == ERROR_OBJECT_WRONG_TYPE)
+            fmt(line, "%s is not an LhA archive.", name);
+        else
+            fmt(line, "Cannot read %s: %s.", name, dos_errstr(err));
+        message(line);
         return;
     }
-    if (!pb->quiet) {
-        Write(out, (APTR)"> ", 2);
-        Write(out, cmd, slen(cmd));
-    }
-    message("Running the command...");
-    if (!s->devlist && !s->found && (dir = Lock((STRPTR)s->path, ACCESS_READ)))
-        old = CurrentDir(dir);
-    else if (s->found && (dir = Lock((STRPTR)s->path, ACCESS_READ)))
-        old = CurrentDir(dir);
-    ok = Execute((STRPTR)cmd, 0, out);
-    if (dir) {
-        CurrentDir(old);
-        UnLock(dir);
-    }
-    if (!pb->quiet) {
-        static const char bye[] = "\nPress Return to close this window. ";
-        static const char nogo[] = "Could not run the command (1.3 needs C:Run for this).\n";
-        char c;
-        if (!ok)
-            Write(out, (APTR)nogo, sizeof(nogo) - 1);
-        Write(out, (APTR)bye, sizeof(bye) - 1);
-        Read(out, &c, 1);
-    }
-    Close(out);
+    err = view_text(win, &topaz8, name, text, len);
+    FreeMem(text, alloc);
     flushinput(NULL);
-    for (k = 0; k < 2; k++)            /* the command may have changed files */
-        if (!pane[k].devlist)
-            reloadkeep(k);
     if (job.resized) {
         job.resized = FALSE;
         resized();
     }
-    fmt(con, ok ? "Done: %s." : "Could not run \"%s\".", pb->label);
-    message(con);
+    sizestr(a, st.original);
+    sizestr(b, st.packed);
+    fmt(line, "%s: %ld files, %ld drawers, %s bytes packed into %s.", name, st.files, st.dirs, a, b);
+    message(err ? "Not enough memory to show the list." : line);
+}
+
+/* the LhA program, or a friendly word about where to get it */
+static BOOL needlha(char *prog)
+{
+    char body[300];
+    if (lha_program(prefs.lha, prog, PATHMAX))
+        return TRUE;
+    if (prefs.lha[0])
+        fmt(body, "Oasis can't find the LhA program named in the prefs:\n%s\n\n"
+                  "Looking inside archives works without it.", prefs.lha);
+    else
+        scopy(body, "Extracting and packing need the LhA program (shareware,\n"
+                    "not part of Oasis or Workbench). Copy it to C:LhA, or\n"
+                    "name it in Oasis.prefs, as in:  LHA \"Work:Tools/LhA\"\n\n"
+                    "Looking inside archives works without it.", sizeof(body));
+    req_choose(win, &topaz8, "LhA", body, "OK");
+    flushinput(NULL);
+    return FALSE;
+}
+
+static BOOL lhapicked(struct Pane *p, int k)
+{
+    return p->nsel ? p->e[k].sel : k == p->cur;
+}
+
+static int etype(struct Pane *p, struct FEntry *e)
+{
+    if (e->kind != EK_FILE)
+        return FT_UNKNOWN;
+    if (!e->spare) {
+        static char full[PATHMAX];
+        pane_entrydir(p, e, full);
+        path_add(full, e->name);
+        e->spare = (UBYTE)(ft_file(full) + 1);
+    }
+    return e->spare - 1;
+}
+
+static void lhaextract(struct Pane *s, struct Pane *d, int n)
+{
+    static char prog[PATHMAX], full[PATHMAX], line[96];
+    char (*cmds)[LHA_CMDMAX], *ptr[MAXPACK];
+    int k, c = 0;
+    if (!needlha(prog))
+        return;
+    if (n > MAXPACK)
+        n = MAXPACK;
+    if (!(cmds = AllocMem(n * LHA_CMDMAX, MEMF_PUBLIC))) {
+        message("Not enough memory.");
+        return;
+    }
+    for (k = 0; k < s->count && c < n; k++)
+        if (lhapicked(s, k)) {
+            pane_entrydir(s, &s->e[k], full);
+            path_add(full, s->e[k].name);
+            if (lha_command(prefs.lhaextract[0] ? prefs.lhaextract : LHA_EXTRACT, prog, full, d->path,
+                            NULL, 0, cmds[c], LHA_CMDMAX) == 0) {
+                ptr[c] = cmds[c];
+                c++;
+            }
+        }
+    if (runcmds(ptr, c, "LhA", FALSE, d->path) >= 0) {
+        fmt(line, "Extracted %ld archive%s.", (LONG)c, c == 1 ? "" : "s");
+        message(line);
+    }
+    FreeMem(cmds, n * LHA_CMDMAX);
+}
+
+static void lhapack(struct Pane *s, struct Pane *d, int n)
+{
+    static char prog[PATHMAX], archive[PATHMAX], name[FNAME + 4], prompt[80], where[40], probe[PATHMAX];
+    char (*cmds)[LHA_CMDMAX] = NULL, **names = NULL, *pool = NULL, *ptr[MAXPACK];
+    int k, m = 0, c, i, cap = n * 2;            /* room for an icon with every entry */
+    BPTR l;
+    /* a name for the archive: the entry's, or the drawer's */
+    for (k = 0; k < s->count && !lhapicked(s, k); k++)
+        ;
+    if (n == 1)
+        scopy(name, s->e[k].name, 27);
+    else {
+        const char *t = s->path, *q;
+        for (q = s->path; *q; q++)
+            if (*q == ':' || *q == '/')
+                t = q + 1;
+        scopy(name, *t ? t : "Archive", 27);
+    }
+    if (!ends_with_nocase(name, ".lha"))
+        scat(name, ".lha", sizeof(name));
+    tail(where, d->path, 36);
+    fmt(prompt, "Pack into this archive, in %s:", where);
+    if (!req_string(win, &topaz8, "LhA", prompt, name, 31) || !name[0]) {
+        flushinput(NULL);
+        return;
+    }
+    flushinput(NULL);
+    if (!needlha(prog))
+        return;
+    scopy(archive, d->path, PATHMAX);
+    path_add(archive, name);
+    if (!(names = AllocMem(cap * sizeof(char *), MEMF_PUBLIC)) || !(pool = AllocMem(cap * PATHMAX, MEMF_PUBLIC)) ||
+        !(cmds = AllocMem(MAXPACK * LHA_CMDMAX, MEMF_PUBLIC))) {
+        message("Not enough memory.");
+        goto out;
+    }
+    /* the names, relative to the source drawer (the commands run there); icons go along */
+    for (k = 0; k < s->count && m < cap - 1; k++) {
+        const char *rel;
+        if (!lhapicked(s, k))
+            continue;
+        rel = pane_reldir(s, &s->e[k]);
+        names[m] = pool + m * PATHMAX;
+        scopy(names[m], rel, PATHMAX);
+        path_add(names[m], s->e[k].name);
+        m++;
+        if (ends_with_nocase(s->e[k].name, ".info"))
+            continue;
+        scopy(probe, s->e[k].name, PATHMAX);
+        scat(probe, ".info", PATHMAX);
+        for (i = 0; i < s->count; i++)                /* is its icon picked itself? */
+            if (lhapicked(s, i) && s->e[i].aux == s->e[k].aux && !nocase_cmp(s->e[i].name, probe))
+                break;
+        scopy(probe, s->path, PATHMAX);
+        path_add(probe, names[m - 1]);
+        scat(probe, ".info", PATHMAX);
+        if (i == s->count) {
+            dos_quiet(TRUE);
+            l = Lock((STRPTR)probe, ACCESS_READ);
+            dos_quiet(FALSE);
+            if (l) {
+                UnLock(l);
+                names[m] = pool + m * PATHMAX;
+                scopy(names[m], names[m - 1], PATHMAX);
+                scat(names[m], ".info", PATHMAX);
+                m++;
+            }
+        }
+    }
+    c = lha_packcmds(prefs.lhapack[0] ? prefs.lhapack : LHA_PACK, prog, archive, names, m, cmds,
+                     MAXPACK, 230);
+    if (c < 0) {
+        message("Too many entries for one archive at a time: select fewer.");
+        goto out;
+    }
+    for (i = 0; i < c; i++)
+        ptr[i] = cmds[i];
+    if (runcmds(ptr, c, "LhA", FALSE, s->path) >= 0) {
+        for (k = 0; k < d->count; k++)                 /* show the new archive */
+            if (!nocase_cmp(d->e[k].name, name)) {
+                d->cur = k;
+                showsel(d);
+                drawpane(1 - active);
+                break;
+            }
+        fmt(prompt, "Packed %ld entr%s into %s.", (LONG)m, m == 1 ? "y" : "ies", name);
+        message(prompt);
+    }
+out:
+    if (cmds)
+        FreeMem(cmds, MAXPACK * LHA_CMDMAX);
+    if (pool)
+        FreeMem(pool, cap * PATHMAX);
+    if (names)
+        FreeMem(names, cap * sizeof(char *));
+}
+
+static void lhaop(void)
+{
+    struct Pane *s = &pane[active], *d = &pane[1 - active];
+    static char body[200], where[40];
+    int k, n = 0, narch = 0, first = -1, a;
+    BOOL destok = !(d->devlist || d->found || d->err[0]);
+    if (s->devlist || (s->err[0] && !s->found)) {
+        message("Open a drawer first.");
+        return;
+    }
+    for (k = 0; k < s->count; k++)
+        if (lhapicked(s, k)) {
+            if (first < 0)
+                first = k;
+            n++;
+            if (etype(s, &s->e[k]) == FT_LHA)
+                narch++;
+        }
+    if (!n) {
+        message("Select something first (click it, or Space).");
+        return;
+    }
+    tail(where, destok ? d->path : "(no drawer in the other pane)", 36);
+    if (narch == n) {                                  /* archives: extract them, or look inside */
+        if (n == 1)
+            fmt(body, "\"%s\" is an LhA archive.\n\nExtract it into %s,\nor list what is in it?",
+                s->e[first].name, where);
+        else
+            fmt(body, "Extract %ld archives into\n%s ?", (LONG)n, where);
+        a = req_choose(win, &topaz8, "LhA", body, n == 1 ? "Extract|List|Cancel" : "Extract|Cancel");
+        flushinput(NULL);
+        if (n == 1 && a == 1) {
+            static char full[PATHMAX];
+            pane_entrydir(s, &s->e[first], full);
+            path_add(full, s->e[first].name);
+            lhaview(full, s->e[first].name);
+        } else if (a == 0) {
+            if (!destok)
+                message("Open the drawer to extract into in the other pane first.");
+            else
+                lhaextract(s, d, n);
+        }
+    } else if (!destok)
+        message("Open the drawer for the new archive in the other pane first.");
+    else
+        lhapack(s, d, n);
 }
 
 /* S:Oasis.prefs, or else Oasis.prefs in the current directory (Oasis's own drawer when it is
@@ -1754,7 +2018,14 @@ static void gadgetup(struct Gadget *g)
             fileop(b);
         else if (b <= B_SIZE || b == B_SEARCH || b == B_COMPARE)
             toolop(b);
-        else if (b == B_VIEW || b == B_HEX) {
+        else if (b == B_LHA) {
+            lhaop();
+            flushinput(NULL);
+            if (job.resized) {
+                job.resized = FALSE;
+                resized();
+            }
+        } else if (b == B_VIEW || b == B_HEX) {
             struct Pane *p = &pane[active];
             if (p->devlist || p->cur < 0 || p->cur >= p->count || p->e[p->cur].kind != EK_FILE)
                 message("Put the cursor on a file to look at it.");
@@ -1885,6 +2156,26 @@ BOOL ui_open(const char *left, const char *right)
                 view_file(win, &topaz8, f[TEST_REQ - 7], TEST_REQ == 8);
             else
                 ilbm_show(f[TEST_REQ - 7]);
+        } else if (TEST_REQ >= 15 && TEST_REQ <= 18) {    /* LhA: list, dialog, no LhA, pack */
+            static char prog[PATHMAX];
+            int k;
+            if (TEST_REQ == 15)
+                lhaview("Work:la/h1.lha", "h1.lha");
+            else if (TEST_REQ == 17)
+                needlha(prog);
+            else {
+                for (k = 0; k < pane[0].count; k++)
+                    if (!nocase_cmp(pane[0].e[k].name, TEST_REQ == 16 ? "h1.lha" : "readme.txt") ||
+                        (TEST_REQ == 18 && !nocase_cmp(pane[0].e[k].name, "tool")))
+                        pane_select(&pane[0], k, TRUE);
+                drawpane(0);
+                if (TEST_REQ == 16)
+                    pane_selectall(&pane[0], FALSE), pane[0].cur = 0;
+                for (k = 0; TEST_REQ == 16 && k < pane[0].count; k++)
+                    if (!nocase_cmp(pane[0].e[k].name, "h1.lha"))
+                        movecursor(0, k);
+                lhaop();
+            }
         } else if (TEST_REQ == 14) {     /* play a sound from the window, as a double-click does */
             int k;
             for (k = 0; k < pane[0].count; k++)

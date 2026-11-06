@@ -49,6 +49,24 @@ static BOOL yes(const char *w, BOOL *ok)
     return FALSE;
 }
 
+/* a command: the rest of the line (BCMD buffer), without the quotes if it is all quoted */
+static BOOL restofline(const char *s, char *d)
+{
+    int n;
+    s = skipsp(s);
+    n = slen(s);
+    while (n && (s[n - 1] == ' ' || s[n - 1] == '\t'))
+        n--;
+    if (n >= 2 && s[0] == '"' && s[n - 1] == '"') {   /* as in "Run Player %s" */
+        s++;
+        n -= 2;
+    }
+    if (!n || n >= BCMD)
+        return FALSE;
+    scopy(d, s, n + 1);
+    return TRUE;
+}
+
 static BOOL line(struct Prefs *p, const char *s)
 {
     char key[16], w[PATHMAX];
@@ -78,7 +96,6 @@ static BOOL line(struct Prefs *p, const char *s)
     } else if (is(key, "BUTTON")) {
         struct PrefButton *b;
         const char *c;
-        int n;
         if (p->nbuttons == MAXBUTTONS)
             return FALSE;
         b = &p->b[p->nbuttons];
@@ -87,19 +104,16 @@ static BOOL line(struct Prefs *p, const char *s)
         b->quiet = is(w, "QUIET");
         if (b->quiet)
             s = c;
-        s = skipsp(s);
-        n = slen(s);
-        while (n && (s[n - 1] == ' ' || s[n - 1] == '\t'))
-            n--;
-        /* the whole command in quotes, as in "Run Player %s": take off the quotes */
-        if (n >= 2 && s[0] == '"' && s[n - 1] == '"') {
-            s++;
-            n -= 2;
-        }
-        if (!b->label[0] || !n || n >= BCMD)
+        if (!b->label[0] || !restofline(s, b->cmd))
             return FALSE;
-        scopy(b->cmd, s, n + 1);
         p->nbuttons++;
+    } else if (is(key, "LHA")) {
+        word(s, p->lha, PATHMAX);
+        ok = p->lha[0] != 0;
+    } else if (is(key, "LHAEXTRACT")) {
+        ok = restofline(s, p->lhaextract);
+    } else if (is(key, "LHAPACK")) {
+        ok = restofline(s, p->lhapack);
     } else
         ok = FALSE;
     return ok;

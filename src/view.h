@@ -8,6 +8,9 @@
    Tab switches between text and hex, Esc closes. */
 LONG view_file(struct Window *parent, struct TextAttr *ta, const char *path, BOOL hex);
 
+/* show text that is already in memory (it stays the caller's) under the title name */
+LONG view_text(struct Window *parent, struct TextAttr *ta, const char *name, char *text, LONG len);
+
 /* command mode: how the text viewer splits the file into lines of cols characters
    (line count, and the first lines as the viewer shows them) */
 LONG view_lines(const char *path, int cols, int show, void (*out)(const char *));

@@ -355,7 +355,7 @@ static void cleanup(void)
         CloseWindow(V.w);
     if (V.line)
         FreeMem(V.line, V.lcap * sizeof(ULONG));
-    if (V.buf)
+    if (V.buf && V.alloc)
         FreeMem(V.buf, V.alloc);
     if (V.fh)
         Close(V.fh);
@@ -400,7 +400,42 @@ static const char *leafname(const char *path)
     return l;
 }
 
+static LONG show(struct Window *parent, struct TextAttr *ta, BOOL hex);
+
+static int startcols(struct Window *parent)
+{
+    int c = (parent->WScreen->Width - 40) / 8;     /* close to the real width: index once */
+    return c > MAXCOLS ? MAXCOLS : c;
+}
+
 LONG view_file(struct Window *parent, struct TextAttr *ta, const char *path, BOOL hex)
+{
+    LONG err;
+    V.name = leafname(path);
+    V.cols = startcols(parent);
+    if ((err = load(path, V.cols))) {
+        cleanup();
+        return err;
+    }
+    return show(parent, ta, hex);
+}
+
+LONG view_text(struct Window *parent, struct TextAttr *ta, const char *name, char *text, LONG len)
+{
+    V.name = name;
+    V.cols = startcols(parent);
+    V.buf = (UBYTE *)text;
+    V.alloc = 0;                                   /* the caller's: not freed here */
+    V.len = V.size = len;
+    V.fh = 0;
+    if (!index_lines(V.cols)) {
+        cleanup();
+        return ERROR_NO_FREE_STORE;
+    }
+    return show(parent, ta, FALSE);
+}
+
+static LONG show(struct Window *parent, struct TextAttr *ta, BOOL hex)
 {
     struct Screen *scr = parent->WScreen;
     struct NewWindow nw = {
@@ -415,18 +450,10 @@ LONG view_file(struct Window *parent, struct TextAttr *ta, const char *path, BOO
     struct Gadget zg = { 0 };
     struct PropInfo zp = { 0 };
     BOOL done = FALSE, drag = FALSE;
-    LONG err;
+    int firstcols = V.cols;
 
-    V.name = leafname(path);
     V.top = 0;
     V.hex = hex;
-    V.cols = (scr->Width - 40) / 8;               /* close to the real width: index once */
-    if (V.cols > MAXCOLS)
-        V.cols = MAXCOLS;
-    if ((err = load(path, V.cols))) {
-        cleanup();
-        return err;
-    }
     nw.TopEdge = scr->BarHeight + 1;
     nw.Width = scr->Width;
     nw.Height = scr->Height - nw.TopEdge;
@@ -458,7 +485,7 @@ LONG view_file(struct Window *parent, struct TextAttr *ta, const char *path, BOO
     if ((font = OpenFont(ta)))
         SetFont(V.rp, font);
     layout();
-    if (V.cols != (scr->Width - 40) / 8 && !hex)
+    if (V.cols != firstcols && !hex)
         index_lines(V.cols);
     RefreshGadgets(&V.prop, V.w, NULL);
     redraw();

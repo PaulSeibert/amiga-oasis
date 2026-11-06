@@ -7,6 +7,9 @@
  *   SORT  NAME | SIZE | DATE
  *   HIDEICONS YES | NO
  *   BUTTON "Label" [QUIET] command line...
+ *   LHA "C:LhA"                   the LhA program (C:LhA when not set)
+ *   LHAEXTRACT %l x %a %d         how to extract (see lha.h for %l %a %d %n)
+ *   LHAPACK %l -r a %a %n         how to pack
  *
  * In a button's command:  %s  the selected entries as quoted full paths (the cursor entry
  * when nothing is selected),  %f  the first of them,  %p  the source drawer,  %d  the
@@ -37,7 +40,9 @@ struct Prefs {
     BOOL hideinfo;
     int  nbuttons;
     struct PrefButton b[MAXBUTTONS];
-    int  badline;                       /* first line Oasis didn't understand, 0 if none */
+    char lha[PATHMAX];                  /* "" = C:LhA */
+    char lhaextract[BCMD], lhapack[BCMD];   /* "" = the built-in templates */
+    int  badline;                      /* first line Oasis didn't understand, 0 if none */
     int  nbad;
 };
 
