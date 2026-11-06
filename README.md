@@ -255,6 +255,7 @@ src/            C sources (ui, pane, ops, tools, match, prefs, view, ilbm, svx, 
 art/            icons and logo as ASCII art (one character per pixel)
 tools/          icon and image converters, test checkers, test media generator (mkiff.py)
 examples/       example prefs files
+docs/DEVELOPMENT.md  design rules, Kickstart 1.3 lessons, how the tests work
 docs/media/     screenshots and animation
 Oasis.readme    Aminet readme (shipped in the archive)
 build.sh        build the program, icon and a test disk
