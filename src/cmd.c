@@ -17,6 +17,7 @@
 #include "ilbm.h"
 #include "svx.h"
 #include "lha.h"
+#include "adf.h"
 #include "cmd.h"
 
 static void out(const char *s)
@@ -614,6 +615,66 @@ static int lhaa(const char *archive, const char *src, char **names, int n)
     return rc;
 }
 
+/* ---- ADF imaging --------------------------------------------------------------------------- */
+
+static int drive(const char *s)
+{
+    if ((s[0] | 0x20) == 'd' && (s[1] | 0x20) == 'f' && s[2] >= '0' && s[2] <= '3' && (!s[3] || s[3] == ':'))
+        return s[2] - '0';
+    return -1;
+}
+
+static BOOL a_progress(void *ctx, int phase, int track)
+{
+    return c_poll(ctx, "");
+}
+
+static int adfinfo(const char *d)
+{
+    BOOL present[4];
+    char vol[DEVNAME], line[96];
+    const char *msg;
+    int u = drive(d), i;
+    adf_drives(present);
+    out("drives:");
+    for (i = 0; i < 4; i++)
+        if (present[i]) {
+            fmt(line, " DF%ld:", (LONG)i);
+            out(line);
+        }
+    out("\n");
+    if (u < 0)
+        return 0;
+    msg = adf_check(u, TRUE, vol, sizeof(vol));
+    fmt(line, "DF%ld: %s%s%s%s\n", (LONG)u, msg ? msg : "ready to write", vol[0] ? " (volume " : "",
+        vol, vol[0] ? ")" : "");
+    out(line);
+    return 0;
+}
+
+static int adfresult(const char *msg, const struct AdfResult *r, const char *done)
+{
+    char line[160];
+    if (msg) {
+        fmt(line, "oasis: %s\n", msg);
+        out(line);
+        return 10;
+    }
+    if (r->aborted) {
+        out("Stopped.\n");
+        return 10;
+    }
+    if (r->bad) {
+        fmt(line, "%s, but %ld track%s could not be read (the first is track %ld): written as zeros.\n",
+            done, (LONG)r->bad, r->bad == 1 ? "" : "s", (LONG)r->firstbad);
+        out(line);
+        return 5;
+    }
+    out(done);
+    out(".\n");
+    return 0;
+}
+
 int cmd_run(int argc, char **argv)
 {
     int i;
@@ -692,6 +753,19 @@ int cmd_run(int argc, char **argv)
         return lhax(argv[3], argv[4]);
     if (argc >= 6 && is(argv[2], "LHAA"))
         return lhaa(argv[3], argv[4], argv + 5, argc - 5);
+    if (argc >= 3 && is(argv[2], "ADFINFO"))
+        return adfinfo(argc > 3 ? argv[3] : "");
+    if (argc == 5 && is(argv[2], "ADFREAD") && drive(argv[3]) >= 0) {
+        struct AdfResult r;
+        const char *msg = adf_read(drive(argv[3]), argv[4], a_progress, NULL, &r);
+        return adfresult(msg, &r, "Disk read into the image");
+    }
+    if ((argc == 5 || argc == 6) && is(argv[2], "ADFWRITE") && drive(argv[4]) >= 0) {
+        struct AdfResult r;
+        BOOL verify = argc == 6 && is(argv[5], "VERIFY");
+        const char *msg = adf_write(argv[3], drive(argv[4]), verify, a_progress, NULL, &r);
+        return adfresult(msg, &r, verify ? "Image written and verified" : "Image written");
+    }
     out("Oasis command mode. Usage:\n"
         "  oasis CMD LIST <drawer>             list a drawer (name, size, protection, date, comment)\n"
         "  oasis CMD TREE <drawer>             list everything below a drawer, sorted\n"
@@ -716,6 +790,9 @@ int cmd_run(int argc, char **argv)
         "  oasis CMD LHALIST <archive>         what is in an LhA archive\n"
         "  oasis CMD LHAX <archive> <drawer>   extract it there (runs C:LhA)\n"
         "  oasis CMD LHAA <archive> <drawer> <name>... | @list   pack names from drawer (runs C:LhA)\n"
+        "  oasis CMD ADFINFO [DFn:]            floppy drives, and whether a disk is ready\n"
+        "  oasis CMD ADFREAD DFn: <file>       read a floppy into an ADF image\n"
+        "  oasis CMD ADFWRITE <file> DFn: [VERIFY]   write an ADF image onto a floppy\n"
         "  oasis CMD MEM                       free memory\n");
     return 5;
 }

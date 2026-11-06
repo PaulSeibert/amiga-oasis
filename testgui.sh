@@ -19,6 +19,7 @@ case "$N" in
   v|7|8|9|1[0-4]) start='oasis Work:vt Work:tt/b' ;;
   15|16|17) start='oasis Work:la Work:la/out' ;;
   18) start='oasis Work:la/src Work:la/out' ;;
+  19|20) start='oasis Work:ad Work:la/out' ;;
   *) start='oasis Work:tt/a Work:tt/b' ;;
 esac
 printf '%s\n' "$start" > build/gui-startup
@@ -46,6 +47,10 @@ for k in ks13 ks31; do
   sed -e 's#^floppy0=.*#floppy0=J:\\amiga\\play\\oasis-gui.adf#' \
       -e 's#^config_description=.*#config_description=Oasis window test#' \
       "/mnt/j/amiga/presets/oasis-$k.uae" > "$PLAY/oasis-gui-$k.uae"
+  if [ "$N" = 19 ] || [ "$N" = 20 ]; then        # ADF dialogs: a second drive with a disk in it
+    sed -i 's#^nr_floppies=.*#nr_floppies=2#' "$PLAY/oasis-gui-$k.uae"
+    printf '%s\n' 'floppy1=J:\amiga\play\oasis-ad-df1.adf' 'floppy1type=0' >> "$PLAY/oasis-gui-$k.uae"
+  fi
 done
 [ "$N" = 0 ] || ./build.sh >/dev/null       # back to the normal build in Work:
 echo "ready: $PLAY/oasis-gui-ks13.uae (TEST_REQ=$N)"

@@ -31,6 +31,7 @@
 #include "ilbm.h"
 #include "svx.h"
 #include "lha.h"
+#include "adf.h"
 #include "ui.h"
 
 extern struct GfxBase *GfxBase;
@@ -104,6 +105,8 @@ static void movecursor(int i, int k);
 static void viewentry(int i, int k, BOOL hex);
 static void lhaview(const char *full, const char *name);
 static void lhaop(void);
+static void adfop(void);
+static int etype(struct Pane *p, struct FEntry *e);
 static void toolop(int b);
 static void runbutton(int i);
 static void reloadprefs(void);
@@ -351,7 +354,7 @@ static void addgadgets(void)
     bw = (XR - X0 + 1 - 7 * BGAP) / 8;
     for (i = 0; i < NBANK; i++) {
         int r = i / 8, c = i % 8;
-        BOOL on = i != B_ADF;                    /* ADF imaging: milestone 6 */
+        BOOL on = TRUE;
         initbtn(&bank[i], GID_BANK + i, bankLabel[i], X0 + c * (bw + BGAP),
                 yBank + r * (BTN_H + BGAP), bw, TRUE, on);
         AddGadget(win, &bank[i].g, (UWORD)~0);
@@ -1557,6 +1560,16 @@ static void viewentry(int i, int k, BOOL hex)
         lhaview(full, e->name);
         return;
     }
+    if (!hex && t == FT_ADF && i == active) {     /* a disk image: offer to write it to a floppy */
+        p->cur = k;
+        adfop();
+        flushinput(NULL);
+        if (job.resized) {
+            job.resized = FALSE;
+            resized();
+        }
+        return;
+    }
     if (!hex && t == FT_ILBM)
         msg = ilbm_show(full);
     else if (!hex && t == FT_8SVX) {
@@ -1690,6 +1703,155 @@ static void runbutton(int i)
         fmt(con, ok ? "Done: %s." : "Could not run \"%s\".", pb->label);
         message(con);
     }
+}
+
+/* ---- ADF disk images ------------------------------------------------------------------------- */
+
+static BOOL a_progress(void *ctx, int phase, int track)
+{
+    static const char *const what[] = { "Reading", "Writing", "Verifying" };
+    BOOL stop = FALSE;
+    char line[96];
+    int n = (XR - X0 + 1) / 8, barw = 160, bx = XR - barw + 1, w;
+    if (!job.resized) {
+        fmt(line, "%s track %ld of 160   (Esc stops)", what[phase], (LONG)track + 1);
+        textpad(X0, yInfo, HI, BG, line, n - barw / 8 - 1);
+        w = (track + (phase == ADF_VERIFYING)) * (barw - 2) / 160;
+        box(bx, yInfo, XR, yInfo + 7, FG);
+        fill(bx + 1, yInfo + 1, bx + w, yInfo + 6, HI);
+        fill(bx + 1 + w, yInfo + 1, XR - 1, yInfo + 6, BG);
+    }
+    flushinput(&stop);
+    return !stop;
+}
+
+/* which drive? buttons for the drives there are; -1 = cancelled */
+static int pickdrive(const char *title, const char *body)
+{
+    static char buttons[40];
+    BOOL present[4];
+    int map[5], n = 0, u, a;
+    adf_drives(present);
+    buttons[0] = 0;
+    for (u = 0; u < 4; u++)
+        if (present[u]) {
+            char b[8];
+            fmt(b, "%sDF%ld:", n ? "|" : "", (LONG)u);
+            scat(buttons, b, sizeof(buttons));
+            map[n++] = u;
+        }
+    scat(buttons, "|Cancel", sizeof(buttons));
+    a = req_choose(win, &topaz8, title, body, buttons);
+    flushinput(NULL);
+    return a < n ? map[a] : -1;
+}
+
+static void adfdone(const char *msg, const struct AdfResult *r, const char *done, int unit)
+{
+    char line[120];
+    int k;
+    flushinput(NULL);
+    if (job.resized) {
+        job.resized = FALSE;
+        resized();
+    }
+    (void)unit;
+    for (k = 0; k < 2; k++)                     /* the disk changed, and a new image may be there */
+        reloadkeep(k);
+    if (msg) {
+        req_choose(win, &topaz8, "ADF", msg, "OK");
+        flushinput(NULL);
+        message(msg);
+    } else if (r->aborted)
+        message("Stopped.");
+    else if (r->bad) {
+        fmt(line, "%s, but %ld track%s could not be read (written as zeros).", done, (LONG)r->bad,
+            r->bad == 1 ? "" : "s");
+        message(line);
+    } else {
+        fmt(line, "%s.", done);
+        message(line);
+    }
+}
+
+static void adfop(void)
+{
+    struct Pane *s = &pane[active], *d = &pane[1 - active];
+    static char full[PATHMAX], body[240], vol[DEVNAME], name[FNAME + 4], line[96], where[40];
+    const char *msg;
+    struct AdfResult r;
+    int k, unit, a;
+    BOOL isadf = FALSE;
+    k = s->cur;
+    if (!s->devlist && k >= 0 && k < s->count && s->e[k].kind == EK_FILE && s->nsel <= 1 &&
+        (s->nsel == 0 || s->e[k].sel))
+        isadf = etype(s, &s->e[k]) == FT_ADF || s->e[k].size == ADF_SIZE;
+    if (isadf) {                                   /* an image under the cursor: write it to a disk */
+        fmt(body, "Write the disk image\n\"%s\"\nonto a floppy. Which drive?", s->e[k].name);
+        if ((unit = pickdrive("Write ADF", body)) < 0)
+            return;
+        if ((msg = adf_check(unit, TRUE, vol, sizeof(vol)))) {
+            req_choose(win, &topaz8, "Write ADF", msg, "OK");
+            flushinput(NULL);
+            return;
+        }
+        fmt(body, "Replace everything on the disk in DF%ld:\n%s%s%s\nwith \"%s\"?", (LONG)unit,
+            vol[0] ? "(\"" : "(a disk without a name", vol, vol[0] ? "\")" : ")", s->e[k].name);
+        a = req_choose(win, &topaz8, "Write ADF", body, "Write and verify|Write|Cancel");
+        flushinput(NULL);
+        if (a > 1)
+            return;
+        pane_entrydir(s, &s->e[k], full);
+        path_add(full, s->e[k].name);
+        msg = adf_write(full, unit, a == 0, a_progress, (void *)"", &r);
+        fmt(line, "DF%ld: now holds %s%s", (LONG)unit, s->e[k].name, a == 0 ? " (verified)" : "");
+        adfdone(msg, &r, line, unit);
+        return;
+    }
+    /* otherwise: read a disk into a new image in the other pane */
+    if (d->devlist || d->found || d->err[0]) {
+        message("To write: cursor on an .adf. To read a disk: open a drawer in the other pane.");
+        return;
+    }
+    tail(where, d->path, 34);
+    fmt(body, "Read a floppy into a new disk image\nin %s. Which drive?", where);
+    if ((unit = pickdrive("Read ADF", body)) < 0)
+        return;
+    if ((msg = adf_check(unit, FALSE, vol, sizeof(vol)))) {
+        req_choose(win, &topaz8, "Read ADF", msg, "OK");
+        flushinput(NULL);
+        return;
+    }
+    scopy(name, vol[0] ? vol : "Disk", 26);
+    for (k = 0; name[k]; k++)                        /* a volume name can hold a / */
+        if (name[k] == '/' || name[k] == ':')
+            name[k] = '_';
+    scat(name, ".adf", sizeof(name));
+    fmt(line, "Name of the image, in %s:", where);
+    if (!req_string(win, &topaz8, "Read ADF", line, name, 31) || !name[0]) {
+        flushinput(NULL);
+        return;
+    }
+    flushinput(NULL);
+    scopy(full, d->path, PATHMAX);
+    path_add(full, name);
+    {
+        BPTR l;
+        dos_quiet(TRUE);
+        l = Lock((STRPTR)full, ACCESS_READ);
+        dos_quiet(FALSE);
+        if (l) {
+            UnLock(l);
+            fmt(body, "\"%s\" already exists.\nReplace it?", name);
+            a = req_choose(win, &topaz8, "Read ADF", body, "Replace|Cancel");
+            flushinput(NULL);
+            if (a)
+                return;
+        }
+    }
+    msg = adf_read(unit, full, a_progress, (void *)"", &r);
+    fmt(line, "DF%ld: read into %s", (LONG)unit, name);
+    adfdone(msg, &r, line, unit);
 }
 
 /* ---- LhA archives ------------------------------------------------------------------------------- */
@@ -2018,8 +2180,11 @@ static void gadgetup(struct Gadget *g)
             fileop(b);
         else if (b <= B_SIZE || b == B_SEARCH || b == B_COMPARE)
             toolop(b);
-        else if (b == B_LHA) {
-            lhaop();
+        else if (b == B_LHA || b == B_ADF) {
+            if (b == B_LHA)
+                lhaop();
+            else
+                adfop();
             flushinput(NULL);
             if (job.resized) {
                 job.resized = FALSE;
@@ -2156,6 +2321,12 @@ BOOL ui_open(const char *left, const char *right)
                 view_file(win, &topaz8, f[TEST_REQ - 7], TEST_REQ == 8);
             else
                 ilbm_show(f[TEST_REQ - 7]);
+        } else if (TEST_REQ == 19 || TEST_REQ == 20) {    /* ADF: write an image / read a disk */
+            int k;
+            for (k = 0; k < pane[0].count; k++)
+                if (!nocase_cmp(pane[0].e[k].name, TEST_REQ == 19 ? "test.adf" : "small.bin"))
+                    movecursor(0, k);
+            adfop();
         } else if (TEST_REQ >= 15 && TEST_REQ <= 18) {    /* LhA: list, dialog, no LhA, pack */
             static char prog[PATHMAX];
             int k;
