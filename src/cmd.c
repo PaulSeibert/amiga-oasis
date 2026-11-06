@@ -8,6 +8,10 @@
 #include "util.h"
 #include "dos13.h"
 #include "ops.h"
+#include "tools.h"
+#include "match.h"
+#include "pane.h"
+#include "prefs.h"
 #include "cmd.h"
 
 static void out(const char *s)
@@ -244,6 +248,180 @@ static int single(LONG err, const char *what, const char *arg)
     return 10;
 }
 
+/* ---- tools ----------------------------------------------------------------------------- */
+
+static BOOL c_poll(void *ctx, const char *drawer)
+{
+    if (SetSignal(0, SIGBREAKF_CTRL_C) & SIGBREAKF_CTRL_C) {
+        out("***Break\n");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static int size(char **args, int n)
+{
+    struct SizeStats st = { 0 };
+    char line[160];
+    int i, rc = 0;
+    LONG err;
+    for (i = 0; i < n && !st.aborted; i++)
+        if ((err = tools_size(args[i], &st, c_poll, NULL)))
+            rc = single(err, "cannot read", args[i]);
+    fmt(line, "%ld files, %ld drawers, %ld bytes, %ld blocks.\n", st.files, st.dirs, st.bytes, st.blocks);
+    out(line);
+    if (st.unreadable) {
+        fmt(line, "Could not read: %ld.\n", st.unreadable);
+        out(line);
+    }
+    return rc || st.unreadable || st.aborted ? 10 : 0;
+}
+
+static ULONG nhits;
+
+static BOOL c_hit(void *ctx, const char *reldir, const struct FileInfoBlock *fib)
+{
+    char line[PATHMAX + 48];
+    fmt(line, "%s%s%s%s\n", reldir, reldir[0] ? "/" : "", fib->fib_FileName,
+        fib->fib_DirEntryType > 0 ? " (dir)" : "");
+    out(line);
+    nhits++;
+    return TRUE;
+}
+
+static int search(const char *drawer, const char *pat)
+{
+    char line[64];
+    ULONG bad = 0;
+    BOOL stopped = FALSE;
+    LONG err;
+    nhits = 0;
+    if ((err = tools_search(drawer, pat, c_hit, c_poll, NULL, &bad, &stopped)))
+        return single(err, "cannot search", drawer);
+    fmt(line, "%ld found.\n", nhits);
+    out(line);
+    return bad || stopped ? 10 : 0;
+}
+
+static int protect(const char *path, const char *spec)
+{
+    struct FileInfoBlock *fib = AllocMem(sizeof(*fib), MEMF_PUBLIC | MEMF_CLEAR);
+    BPTR l;
+    LONG prot, err = 0;
+    if (!fib)
+        return 20;
+    if ((l = Lock((STRPTR)path, ACCESS_READ)) && Examine(l, fib)) {
+        UnLock(l);
+        l = 0;
+        if (!tools_parseprot(spec, fib->fib_Protection, &prot))
+            err = ERROR_BAD_TEMPLATE;
+        else if (!SetProtection((STRPTR)path, prot))
+            err = IoErr();
+    } else
+        err = IoErr();
+    if (l)
+        UnLock(l);
+    FreeMem(fib, sizeof(*fib));
+    return single(err, "cannot protect", path);
+}
+
+static int compare(const char *a, const char *b)
+{
+    static struct Pane pa, pb;              /* static: they are big */
+    struct CmpStats st;
+    char line[96];
+    int i, j, rc = 0;
+    scopy(pa.path, a, PATHMAX);
+    scopy(pb.path, b, PATHMAX);
+    if (!pane_read(&pa, SORT_NAME, FALSE))
+        rc = single(ERROR_OBJECT_NOT_FOUND, "cannot read", a);
+    else if (!pane_read(&pb, SORT_NAME, FALSE))
+        rc = single(ERROR_OBJECT_NOT_FOUND, "cannot read", b);
+    else {
+        tools_compare(&pa, &pb, &st);
+        for (i = 0; i < pa.count; i++)
+            if (pa.e[i].sel) {
+                for (j = 0; j < pb.count && nocase_cmp(pa.e[i].name, pb.e[j].name); j++)
+                    ;
+                fmt(line, "%s %s\n", j < pb.count ? "differs:" : "only in 1:", pa.e[i].name);
+                out(line);
+            }
+        for (i = 0; i < pb.count; i++)
+            if (pb.e[i].sel) {
+                for (j = 0; j < pa.count && nocase_cmp(pb.e[i].name, pa.e[j].name); j++)
+                    ;
+                if (j == pa.count) {
+                    fmt(line, "only in 2: %s\n", pb.e[i].name);
+                    out(line);
+                }
+            }
+        fmt(line, "%ld only in 1, %ld only in 2, %ld differ, %ld the same.\n", (LONG)st.onlyA,
+            (LONG)st.onlyB, (LONG)st.differ, (LONG)st.same);
+        out(line);
+    }
+    pane_free(&pa);
+    pane_free(&pb);
+    return rc;
+}
+
+static struct Prefs P;                      /* static: too big for a 1.3 stack */
+
+static int prefs(const char *file)
+{
+    static const char *const sortname[] = { "NAME", "SIZE", "DATE" };
+    char line[BCMD + 64];
+    int i;
+    if (!prefs_load(file, &P))
+        return single(ERROR_OBJECT_NOT_FOUND, "cannot read", file);
+    if (P.hasleft) { fmt(line, "LEFT \"%s\"\n", P.left); out(line); }
+    if (P.hasright) { fmt(line, "RIGHT \"%s\"\n", P.right); out(line); }
+    if (P.hassort) { fmt(line, "SORT %s\n", sortname[P.sort]); out(line); }
+    if (P.hashide) { fmt(line, "HIDEICONS %s\n", P.hideinfo ? "YES" : "NO"); out(line); }
+    for (i = 0; i < P.nbuttons; i++) {
+        fmt(line, "BUTTON %ld \"%s\"%s [%s]\n", (LONG)i + 1, P.b[i].label, P.b[i].quiet ? " QUIET" : "",
+            P.b[i].cmd);
+        out(line);
+    }
+    if (P.nbad) {
+        fmt(line, "Not understood: %ld line%s, the first is line %ld.\n", (LONG)P.nbad,
+            P.nbad == 1 ? "" : "s", (LONG)P.badline);
+        out(line);
+    }
+    return P.nbad ? 5 : 0;
+}
+
+/* BUTTON <prefsfile> <n> <srcdrawer> <dstdrawer> [<file>...]: run custom button n as the
+   window would (files: full paths), with its output here */
+static int button(char **argv, int argc)
+{
+    static char cmd[1024];
+    int n = 0, r;
+    const char *c;
+    BPTR dir, old;
+    for (c = argv[4]; *c >= '0' && *c <= '9'; c++)
+        n = n * 10 + *c - '0';
+    if (!prefs_load(argv[3], &P))
+        return single(ERROR_OBJECT_NOT_FOUND, "cannot read", argv[3]);
+    if (n < 1 || n > P.nbuttons)
+        return single(ERROR_OBJECT_NOT_FOUND, "no such button", argv[4]);
+    r = prefs_expand(P.b[n - 1].cmd, argv[5], argv[6], argv + 7, argc - 7, cmd, sizeof(cmd));
+    if (r) {
+        out(r == 1 ? "oasis: this button needs files\n" : "oasis: the command line is too long\n");
+        return 10;
+    }
+    out("> ");
+    out(cmd);
+    if (!(dir = Lock((STRPTR)argv[5], ACCESS_READ)))
+        return single(IoErr(), "cannot open", argv[5]);
+    old = CurrentDir(dir);
+    r = Execute((STRPTR)cmd, 0, Output()) ? 0 : 10;
+    CurrentDir(old);
+    UnLock(dir);
+    if (r)
+        out("oasis: could not run the command (Execute failed)\n");
+    return r;
+}
+
 int cmd_run(int argc, char **argv)
 {
     int i;
@@ -286,7 +464,28 @@ int cmd_run(int argc, char **argv)
             return single(ERROR_INVALID_COMPONENT_NAME, "cannot rename", argv[3]);
         return single(ops_rename(dir, name, name2), "cannot rename", argv[3]);
     }
-    (void)i;
+    if (argc >= 4 && is(argv[2], "SIZE"))
+        return size(argv + 3, argc - 3);
+    if (argc == 5 && is(argv[2], "SEARCH"))
+        return search(argv[3], argv[4]);
+    if (argc == 5 && is(argv[2], "PROTECT"))
+        return protect(argv[3], argv[4]);
+    if (argc == 5 && is(argv[2], "COMMENT"))
+        return single(SetComment((STRPTR)argv[3], (STRPTR)argv[4]) ? 0 : IoErr(), "cannot comment", argv[3]);
+    if (argc == 5 && is(argv[2], "COMPARE"))
+        return compare(argv[3], argv[4]);
+    if (argc >= 5 && is(argv[2], "MATCH")) {
+        for (i = 4; i < argc; i++) {
+            char line[96];
+            fmt(line, "%s %s\n", match_search(argv[3], argv[i]) ? "yes" : "no ", argv[i]);
+            out(line);
+        }
+        return 0;
+    }
+    if (argc == 4 && is(argv[2], "PREFS"))
+        return prefs(argv[3]);
+    if (argc >= 7 && is(argv[2], "BUTTON"))
+        return button(argv, argc);
     out("Oasis command mode. Usage:\n"
         "  oasis CMD LIST <drawer>             list a drawer (name, size, protection, date, comment)\n"
         "  oasis CMD TREE <drawer>             list everything below a drawer, sorted\n"
@@ -296,6 +495,14 @@ int cmd_run(int argc, char **argv)
         "  oasis CMD DELETE <path>... [FORCE]  delete (FORCE: protected files too)\n"
         "  oasis CMD MAKEDIR <path>            make a drawer\n"
         "  oasis CMD RENAME <path> <newname>   rename (its icon too)\n"
+        "  oasis CMD SIZE <path>...            add up files and drawers\n"
+        "  oasis CMD SEARCH <drawer> <pattern> find names (#? ? * wildcards, or part of a name)\n"
+        "  oasis CMD PROTECT <path> <bits>     set the hsparwed bits (rwed, +s, -d)\n"
+        "  oasis CMD COMMENT <path> <text>     set the file comment\n"
+        "  oasis CMD COMPARE <drawer> <drawer> what is only on one side, or differs\n"
+        "  oasis CMD MATCH <pattern> <name>... try a pattern\n"
+        "  oasis CMD PREFS <file>              check a prefs file\n"
+        "  oasis CMD BUTTON <prefs> <n> <src> <dst> [file...]   run custom button n\n"
         "  oasis CMD MEM                       free memory\n");
     return 5;
 }

@@ -1,0 +1,23 @@
+; Oasis prefs: copy this file to S:Oasis.prefs, or keep it next to Oasis.
+; Lines starting with ; are comments. After editing, choose Project > Reload prefs.
+;
+; LEFT and RIGHT: the drawers the panes open on ("" = the device list).
+;LEFT "Work:"
+;RIGHT ""
+;
+; SORT NAME, SIZE or DATE.  HIDEICONS YES hides the .info files.
+SORT NAME
+HIDEICONS NO
+;
+; Custom buttons (up to 12), shown in a row under the others:
+;   BUTTON "Label" [QUIET] command line
+; In the command, %s is the selected files (quoted full paths), %f the first of them,
+; %p the drawer they are in, %d the drawer in the other pane, %% a percent sign.
+; The output appears in a window that waits for Return; QUIET throws it away (use
+; QUIET with Run for programs that open their own window).
+BUTTON "Read" Type %f
+BUTTON "Edit" QUIET Run Ed %f
+BUTTON "Notepad" QUIET Run SYS:Utilities/NotePad %f
+BUTTON "List" List %p
+BUTTON "Disks" Info
+BUTTON "Memory" Avail

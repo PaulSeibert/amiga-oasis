@@ -13,4 +13,8 @@ int  req_choose(struct Window *parent, struct TextAttr *ta, const char *title,
 BOOL req_string(struct Window *parent, struct TextAttr *ta, const char *title,
                 const char *prompt, char *buf, int size);
 
+/* the eight protection bits as toggles (hsparwed order, TRUE = shown on); OK / Cancel */
+BOOL req_protect(struct Window *parent, struct TextAttr *ta, const char *title,
+                 const char *prompt, BOOL on[8]);
+
 #endif

@@ -17,7 +17,9 @@ struct FEntry {
     LONG  prot;
     UBYTE kind;                      /* EK_... */
     UBYTE sel;
-    UWORD pad;
+    UBYTE sized;                     /* drawer whose size has been worked out (Size) */
+    UBYTE spare;
+    LONG  aux;                       /* search results: offset of its drawer in pool, -1: none */
 };
 
 struct Pane {
@@ -30,6 +32,10 @@ struct Pane {
     char  vol[DEVNAME];
     char  err[48];                   /* why the last read failed, "" if it worked */
     BOOL  devlist;
+    BOOL  found;                     /* showing search results for pattern below path */
+    char  pattern[64];
+    char *pool;                      /* search results: their drawers, relative to path */
+    LONG  poolcap, poolused;
 };
 
 BOOL pane_read(struct Pane *p, int sort, BOOL hideinfo);   /* reads p->path */
@@ -39,5 +45,11 @@ void pane_free(struct Pane *p);
 void pane_select(struct Pane *p, int i, BOOL on);
 void pane_selectall(struct Pane *p, BOOL on);
 BOOL pane_isdir(const struct FEntry *e);   /* something you can enter */
+
+/* search results: start an empty list, add hits (reldir "" = path itself) */
+void pane_beginfound(struct Pane *p, const char *pattern);
+BOOL pane_addhit(struct Pane *p, const char *reldir, const struct FileInfoBlock *fib);
+const char *pane_reldir(const struct Pane *p, const struct FEntry *e);
+void pane_entrydir(const struct Pane *p, const struct FEntry *e, char *out);   /* PATHMAX */
 
 #endif

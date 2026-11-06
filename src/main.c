@@ -40,8 +40,8 @@ int main(int argc, char **argv)
         rc = 0;
         goto out;
     }
-    /* default: SYS: on the left, the device list on the right */
-    if (!ui_open(argc > 1 ? argv[1] : "SYS:", argc > 2 ? argv[2] : ""))
+    /* no drawers given: from S:Oasis.prefs, or SYS: on the left and the device list on the right */
+    if (!ui_open(argc > 1 ? argv[1] : NULL, argc > 2 ? argv[2] : NULL))
         goto out;
     while (running) {
         ULONG sigs = Wait(ui_sigmask() | SIGBREAKF_CTRL_C);

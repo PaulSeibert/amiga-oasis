@@ -182,7 +182,7 @@ BOOL req_string(struct Window *parent, struct TextAttr *ta, const char *title,
     struct Window *w;
     struct TextFont *font;
     struct IntuiMessage *im;
-    int width = 360, gw, result = -1;
+    int width = size > 40 ? 480 : 360, gw, result = -1;
 
     if (size > (int)sizeof(text))
         size = sizeof(text);
@@ -244,5 +244,106 @@ BOOL req_string(struct Window *parent, struct TextAttr *ta, const char *title,
         CloseFont(font);
     if (result == 1)
         scopy(buf, (char *)text, size);
+    return result == 1;
+}
+
+/* ---- protection bits ------------------------------------------------------------------- */
+
+#define NPROT 8
+static const char *const protname[NPROT] = { "Hidden", "Script", "Pure", "Archived",
+                                             "Read", "Write", "Execute", "Delete" };
+
+static void drawtoggle(struct RastPort *rp, struct Gadget *g, BOOL on)
+{
+    const char *l = protname[g->GadgetID - 50];
+    int x = g->LeftEdge, y = g->TopEdge, n = slen(l);
+    SetAPen(rp, on ? 3 : 0);
+    RectFill(rp, x + 1, y + 1, x + g->Width - 2, y + g->Height - 2);
+    SetAPen(rp, 1);
+    Move(rp, x, y);
+    Draw(rp, x + g->Width - 1, y);
+    Draw(rp, x + g->Width - 1, y + g->Height - 1);
+    Draw(rp, x, y + g->Height - 1);
+    Draw(rp, x, y);
+    SetAPen(rp, on ? 2 : 1);
+    SetDrMd(rp, JAM1);
+    Move(rp, x + (g->Width - n * 8) / 2, y + 3 + rp->TxBaseline);
+    Text(rp, (STRPTR)l, n);
+}
+
+BOOL req_protect(struct Window *parent, struct TextAttr *ta, const char *title,
+                 const char *prompt, BOOL on[8])
+{
+    static struct Dlg d;
+    static struct Gadget tg[NPROT];
+    static BOOL state[NPROT];
+    struct Gadget zg = { 0 };
+    struct Window *w;
+    struct TextFont *font;
+    struct IntuiMessage *im;
+    int tw = 76, gap = 4, width = NPROT / 2 * tw + (NPROT / 2 - 1) * gap + 40, i, result = -1;
+
+    if (slen(prompt) * 8 + 40 > width)
+        width = slen(prompt) * 8 + 40;
+    mkbuttons(&d, "OK|Cancel", ta, width, 1);
+    for (i = 0; i < NPROT; i++) {
+        struct Gadget *g = &tg[i];
+        *g = zg;
+        g->NextGadget = i + 1 < NPROT ? &tg[i + 1] : &d.g[0];
+        g->LeftEdge = (width - (NPROT / 2 * tw + (NPROT / 2 - 1) * gap)) / 2 + (i % 4) * (tw + gap);
+        g->TopEdge = 12 + 6 + 14 + (i / 4) * (BH + gap);
+        g->Width = tw;
+        g->Height = BH;
+        g->Flags = GADGHNONE;
+        g->Activation = RELVERIFY;
+        g->GadgetType = BOOLGADGET;
+        g->GadgetID = 50 + i;
+        state[i] = on[i];
+    }
+    if (!(w = openat(parent, width, 12 + 6 + 14 + 2 * BH + gap + 10 + BH + 8, title, &tg[0],
+                     GADGETUP | VANILLAKEY)))
+        return FALSE;
+    if ((font = OpenFont(ta)))
+        SetFont(w->RPort, font);
+    say(w->RPort, 20, w->BorderTop + 5, prompt);
+    for (i = 0; i < NPROT; i++)
+        drawtoggle(w->RPort, &tg[i], state[i]);
+    while (result < 0) {
+        WaitPort(w->UserPort);
+        while ((im = (struct IntuiMessage *)GetMsg(w->UserPort))) {
+            ULONG class = im->Class;
+            UWORD code = im->Code;
+            struct Gadget *g = (struct Gadget *)im->IAddress;
+            int t = -1;
+            ReplyMsg((struct Message *)im);
+            if (result >= 0)
+                continue;
+            if (class == GADGETUP) {
+                if (g->GadgetID >= 50)
+                    t = g->GadgetID - 50;
+                else
+                    result = g->GadgetID == 1;
+            } else if (class == VANILLAKEY) {
+                if (code == 13)
+                    result = 1;
+                else if (code == 27)
+                    result = 0;
+                else                                  /* the letters h s p a r w e d */
+                    for (i = 0; i < NPROT; i++)
+                        if (lower(code) == lower((UBYTE)protname[i][0]))
+                            t = i;
+            }
+            if (t >= 0) {
+                state[t] = !state[t];
+                drawtoggle(w->RPort, &tg[t], state[t]);
+            }
+        }
+    }
+    CloseWindow(w);
+    if (font)
+        CloseFont(font);
+    if (result == 1)
+        for (i = 0; i < NPROT; i++)
+            on[i] = state[i];
     return result == 1;
 }

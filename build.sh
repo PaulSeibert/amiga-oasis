@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 mkdir -p build
 python3 tools/mkicon.py art/icon.txt build/oasis.info 8192
 python3 tools/mkimage.py art/logo.txt logo build/logo.c
-SRC="src/main.c src/ui.c src/pane.c src/dos13.c src/util.c src/cmd.c src/ops.c src/req.c src/about.c build/logo.c"
+SRC="src/main.c src/ui.c src/pane.c src/dos13.c src/util.c src/cmd.c src/ops.c src/req.c src/tools.c src/match.c src/prefs.c src/about.c build/logo.c"
 docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/src" -w /src \
   "${AGK_TOOLCHAIN_IMAGE:-amigadev/crosstools:m68k-amigaos}" sh -euc "
   m68k-amigaos-gcc -mcrt=nix13 -m68000 -Os -Wall -Wextra -Wno-unused-parameter -s -Isrc \
@@ -24,4 +24,6 @@ docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/src" -w /src \
     + write build/oasis.info oasis.info + makedir s + write build/startup-sequence s/startup-sequence >/dev/null"
 SHARE=${OASIS_SHARE:-/mnt/j/amiga/share}
 [ -d "$SHARE" ] && cp build/oasis build/oasis.info build/oasis.adf "$SHARE/"
+# the example prefs next to Oasis in Work: (never over one that has been edited)
+if [ -d "$SHARE" ] && [ ! -e "$SHARE/Oasis.prefs" ]; then cp examples/Oasis.prefs "$SHARE/"; fi
 ls -l build/oasis build/oasis.info build/oasis.adf

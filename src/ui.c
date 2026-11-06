@@ -24,6 +24,8 @@
 #include "about.h"
 #include "ops.h"
 #include "req.h"
+#include "tools.h"
+#include "prefs.h"
 #include "ui.h"
 
 extern struct GfxBase *GfxBase;
@@ -42,7 +44,7 @@ extern struct IntuitionBase *IntuitionBase;
 /* pens: the four Workbench colours (1.3: blue white black orange; 2.0+: grey black white blue) */
 enum { BG, FG, DARK, HI };
 
-enum { GID_PATH = 1, GID_PROP = 3, GID_QUICK = 10, GID_NAV = 20, GID_BANK = 30 };
+enum { GID_PATH = 1, GID_PROP = 3, GID_QUICK = 10, GID_NAV = 20, GID_BANK = 30, GID_CUSTOM = 70 };
 enum { NAV_DEVS, NAV_PARENT, NAV_ROOT, NAV_RESCAN };
 enum { B_COPY, B_MOVE, B_RENAME, B_DELETE, B_MAKEDIR, B_PROTECT, B_COMMENT, B_SIZE,
        B_VIEW, B_HEX, B_SEARCH, B_COMPARE, B_LHA, B_ADF, B_ALL, B_NONE };
@@ -66,7 +68,9 @@ static int active;
 static int sortmode = SORT_NAME;
 static BOOL hideinfo;
 
-static struct Btn quick[NQUICK], nav[NNAV], bank[NBANK];
+static struct Btn quick[NQUICK], nav[NNAV], bank[NBANK], custom[MAXBUTTONS];
+static struct Prefs prefs;          /* S:Oasis.prefs */
+static int crows;                   /* rows of custom buttons (0-2) */
 static char quickName[NQUICK][DEVNAME + 1];
 static int nquick;
 static const char *const navLabel[NNAV] = { "Devs", "Parent", "Root", "Rescan" };
@@ -91,22 +95,26 @@ static ULONG clickSecs, clickMicros;
 static int clickPane = -1, clickRow = -1;
 
 static void fileop(int b);
+static void movecursor(int i, int k);
+static void toolop(int b);
+static void runbutton(int i);
+static void reloadprefs(void);
 
 /* layout */
-static int X0, XR, yPath, yBar, listT, listB, rows, yStat, yInfo, yBank;
+static int X0, XR, yPath, yBar, listT, listB, rows, yStat, yInfo, yBank, yCustom;
 static int paneX[2], paneW, cols;
 
 /* ---- menus ------------------------------------------------------------------------------ */
 
 enum { M_PROJECT, M_SELECT, M_VIEW };
-#define N_PROJ 3
+#define N_PROJ 4
 #define N_SEL  2
 #define N_VIEW 5
 static struct MenuItem projItem[N_PROJ], selItem[N_SEL], viewItem[N_VIEW];
 static struct IntuiText projText[N_PROJ], selText[N_SEL], viewText[N_VIEW];
-static struct Menu viewMenu = { NULL, 140, 0, 50, 0, MENUENABLED, (UBYTE *)"View", viewItem, 0, 0, 0, 0 };
-static struct Menu selMenu = { &viewMenu, 70, 0, 60, 0, MENUENABLED, (UBYTE *)"Select", selItem, 0, 0, 0, 0 };
-static struct Menu projMenu = { &selMenu, 0, 0, 70, 0, MENUENABLED, (UBYTE *)"Project", projItem, 0, 0, 0, 0 };
+static struct Menu viewMenu = { NULL, 160, 0, 56, 0, MENUENABLED, (UBYTE *)"View", viewItem, 0, 0, 0, 0 };
+static struct Menu selMenu = { &viewMenu, 84, 0, 68, 0, MENUENABLED, (UBYTE *)"Select", selItem, 0, 0, 0, 0 };
+static struct Menu projMenu = { &selMenu, 0, 0, 80, 0, MENUENABLED, (UBYTE *)"Project", projItem, 0, 0, 0, 0 };
 
 static void mkitems(struct MenuItem *it, struct IntuiText *tx, int n, const char *const *label,
                     const char *keys, int width, const UWORD *flags, const LONG *excl)
@@ -126,14 +134,14 @@ static void mkitems(struct MenuItem *it, struct IntuiText *tx, int n, const char
 
 static void initmenus(void)
 {
-    static const char *const proj[] = { "About...", "Rescan", "Quit" };
+    static const char *const proj[] = { "About...", "Reload prefs", "Rescan", "Quit" };
     static const char *const sel[] = { "Select all", "Select none" };
     static const char *const view[] = { "Sort by name", "Sort by size", "Sort by date",
                                         "Hide .info files", "Device list" };
     static const UWORD vflags[] = { CHECKIT, CHECKIT, CHECKIT, CHECKIT | MENUTOGGLE, 0 };
     static const LONG vex[] = { 0x06, 0x05, 0x03, 0, 0 };
     int w = CHECKWIDTH + 8 * 16 + COMMWIDTH + 8;
-    mkitems(projItem, projText, N_PROJ, proj, " RQ", 8 * 9 + COMMWIDTH + 8, NULL, NULL);
+    mkitems(projItem, projText, N_PROJ, proj, "  RQ", 8 * 13 + COMMWIDTH + 8, NULL, NULL);
     mkitems(selItem, selText, N_SEL, sel, "AN", 8 * 11 + COMMWIDTH + 8, NULL, NULL);
     mkitems(viewItem, viewText, N_VIEW, view, "   ID", w, vflags, vex);
 }
@@ -268,7 +276,9 @@ static void layout(void)
     yPath = win->BorderTop + 4;
     yBar = yPath + 14;
     listT = yBar + BTN_H + 6;
-    yBank = win->Height - win->BorderBottom - 3 - 2 * BTN_H - BGAP;
+    crows = (prefs.nbuttons + 7) / 8;
+    yCustom = win->Height - win->BorderBottom - 3 - crows * (BTN_H + BGAP) + BGAP;
+    yBank = (crows ? yCustom - BGAP : win->Height - win->BorderBottom - 3 + BGAP) - 2 * BTN_H - 2 * BGAP;
     yInfo = yBank - 12;
     yStat = yInfo - 11;
     listB = yStat - 4;
@@ -333,10 +343,19 @@ static void addgadgets(void)
     bw = (XR - X0 + 1 - 7 * BGAP) / 8;
     for (i = 0; i < NBANK; i++) {
         int r = i / 8, c = i % 8;
-        BOOL on = (i <= B_MAKEDIR || i == B_ALL || i == B_NONE);  /* the rest: later milestones */
+        BOOL on = !(i == B_VIEW || i == B_HEX || i == B_LHA || i == B_ADF);  /* later milestones */
         initbtn(&bank[i], GID_BANK + i, bankLabel[i], X0 + c * (bw + BGAP),
                 yBank + r * (BTN_H + BGAP), bw, TRUE, on);
         AddGadget(win, &bank[i].g, (UWORD)~0);
+    }
+    /* custom buttons from the prefs file: up to two more rows of eight */
+    for (i = 0; i < MAXBUTTONS; i++) {
+        custom[i].used = FALSE;
+        if (i < prefs.nbuttons) {
+            initbtn(&custom[i], GID_CUSTOM + i, prefs.b[i].label, X0 + (i % 8) * (bw + BGAP),
+                    yCustom + (i / 8) * (BTN_H + BGAP), bw, TRUE, TRUE);
+            AddGadget(win, &custom[i].g, (UWORD)~0);
+        }
     }
     /* list scrollers */
     for (i = 0; i < 2; i++) {
@@ -360,22 +379,59 @@ static void addgadgets(void)
     RefreshGadgets(win->FirstGadget, win, NULL);
 }
 
+static void removegadgets(void)
+{
+    int i;
+    for (i = 0; i < 2; i++) {
+        RemoveGadget(win, &strGad[i]);
+        RemoveGadget(win, &propGad[i]);
+    }
+    for (i = 0; i < NQUICK; i++)
+        if (quick[i].used)
+            RemoveGadget(win, &quick[i].g);
+    for (i = 0; i < NNAV; i++)
+        RemoveGadget(win, &nav[i].g);
+    for (i = 0; i < NBANK; i++)
+        RemoveGadget(win, &bank[i].g);
+    for (i = 0; i < MAXBUTTONS; i++)
+        if (custom[i].used)
+            RemoveGadget(win, &custom[i].g);
+}
+
 /* ---- panes ----------------------------------------------------------------------------------- */
 
 static void entryrow(char *buf, const struct Pane *p, int i, BOOL cursor)
 {
+    static char full[PATHMAX];
     const struct FEntry *e = &p->e[i];
+    const char *nm = e->name;
     int nw = cols - 11, n, k;
     char sz[16];
     char *d = buf;
     *d++ = cursor ? '>' : ' ';
-    for (k = 0; k < nw && e->name[k]; k++)
-        *d++ = e->name[k];
+    if (p->found && pane_reldir(p, e)[0]) {       /* a search hit below the start: "dir/name" */
+        scopy(full, pane_reldir(p, e), PATHMAX);
+        path_add(full, e->name);
+        nm = full;
+        if ((n = slen(full)) > nw) {             /* too long: keep the end, it says the most */
+            nm = full + n - nw + 2;
+            *d++ = '.';
+            *d++ = '.';
+            nw -= 2;
+        }
+    }
+    for (k = 0; k < nw && nm[k]; k++)
+        *d++ = nm[k];
     for (; k < nw; k++)
         *d++ = ' ';
     switch (e->kind) {
     case EK_FILE:   sizestr(sz, e->size); break;
-    case EK_DIR:    scopy(sz, "Drawer", sizeof(sz)); break;
+    case EK_DIR:
+        if (e->sized)
+            sizestr(sz, e->size);
+        else
+            scopy(sz, "Drawer", sizeof(sz));
+        break;
     case EK_DEVICE: scopy(sz, "Device", sizeof(sz)); break;
     case EK_VOLUME: scopy(sz, "Volume", sizeof(sz)); break;
     default:        scopy(sz, "Assign", sizeof(sz));
@@ -450,6 +506,8 @@ static void drawstatus(int i)
     char line[64], a[16], b[16];
     if (p->devlist)
         fmt(line, "%ld devices, volumes and assigns", (LONG)p->count);
+    else if (p->found && !p->nsel)
+        fmt(line, "%ld found: \"%s\"", (LONG)p->count, p->pattern);
     else if (p->err[0])
         fmt(line, "%s", p->err);
     else if (p->nsel) {
@@ -481,7 +539,7 @@ static void getcomment(const struct Pane *p, const struct FEntry *e, char *out, 
     out[0] = 0;
     if (p->devlist || !(fib = AllocMem(sizeof(*fib), MEMF_PUBLIC | MEMF_CLEAR)))
         return;
-    scopy(full, p->path, PATHMAX);
+    pane_entrydir(p, e, full);
     path_add(full, e->name);
     dos_quiet(TRUE);
     if ((lock = Lock((STRPTR)full, ACCESS_READ))) {
@@ -507,14 +565,19 @@ static void drawinfo(void)
                 fmt(line, "%s:  (%s)", e->name, e->kind == EK_DEVICE ? "device"
                                        : e->kind == EK_VOLUME ? "volume" : "assign");
             else {
+                static char nm[PATHMAX];
                 dos_datestr(date, &e->date);
                 dos_protstr(prot, e->prot);
                 getcomment(p, e, comment, sizeof(comment));
-                if (e->kind == EK_DIR)
-                    fmt(line, "%s  drawer  %s  %s", e->name, date, prot);
+                scopy(nm, pane_reldir(p, e), PATHMAX);
+                path_add(nm, e->name);
+                if (e->kind == EK_DIR && e->sized)
+                    fmt(line, "%s  drawer, %ld bytes  %s  %s", nm, e->size, date, prot);
+                else if (e->kind == EK_DIR)
+                    fmt(line, "%s  drawer  %s  %s", nm, date, prot);
                 else {
                     fmt(sz, "%ld", e->size);
-                    fmt(line, "%s  %s bytes  %s  %s", e->name, sz, date, prot);
+                    fmt(line, "%s  %s bytes  %s  %s", nm, sz, date, prot);
                 }
                 if (comment[0]) {
                     scat(line, "  : ", sizeof(line));
@@ -574,14 +637,24 @@ static void clamptop(struct Pane *p)
         p->top = 0;
 }
 
-/* (re)read pane i from its path, or its device list */
-static void loadpane(int i)
+static void dosearch(int i);
+
+/* read what pane i shows: its drawer, the device list, or its search results again */
+static void readpane(int i)
 {
     struct Pane *p = &pane[i];
-    if (p->devlist || !p->path[0])
+    if (p->found)
+        dosearch(i);
+    else if (p->devlist || !p->path[0])
         pane_devlist(p);
     else
         pane_read(p, sortmode, hideinfo);
+}
+
+/* (re)read pane i from its path, or its device list */
+static void loadpane(int i)
+{
+    readpane(i);
     setpathgad(i);
     infoIsMsg = FALSE;
     drawpane(i);
@@ -593,6 +666,7 @@ static void go(int i, const char *path)
 {
     scopy(pane[i].path, path, PATHMAX);
     pane[i].devlist = !path[0];
+    pane[i].found = FALSE;
     loadpane(i);
 }
 
@@ -621,6 +695,23 @@ static void open_entry(int i, int k)
     if (p->devlist) {
         fmt(path, "%s:", e->name);
         go(i, path);
+    } else if (p->found) {
+        /* a search hit: open its drawer (a drawer hit: open the drawer itself) */
+        char name[FNAME];
+        int j;
+        scopy(name, e->name, FNAME);
+        pane_entrydir(p, e, path);
+        if (e->kind == EK_DIR) {
+            path_add(path, name);
+            go(i, path);
+        } else {
+            go(i, path);
+            for (j = 0; j < p->count; j++)
+                if (!nocase_cmp(p->e[j].name, name)) {
+                    movecursor(i, j);
+                    break;
+                }
+        }
     } else if (e->kind == EK_DIR) {
         scopy(path, p->path, PATHMAX);
         path_add(path, e->name);
@@ -634,6 +725,11 @@ static void parent(int i)
     char path[PATHMAX];
     if (pane[i].devlist)
         return;
+    if (pane[i].found) {               /* out of the search results, back to the drawer */
+        scopy(path, pane[i].path, PATHMAX);
+        go(i, path);
+        return;
+    }
     scopy(path, pane[i].path, PATHMAX);
     if (path_parent(path))
         go(i, path);
@@ -667,6 +763,8 @@ static void redrawall(void)
         drawbtn(&nav[i]);
     for (i = 0; i < NBANK; i++)
         drawbtn(&bank[i]);
+    for (i = 0; i < MAXBUTTONS; i++)
+        drawbtn(&custom[i]);
     for (i = 0; i < 2; i++) {
         drawpane(i);
         setprop(i, TRUE);
@@ -755,7 +853,7 @@ static void resort(void)
 {
     int i;
     for (i = 0; i < 2; i++)
-        if (!pane[i].devlist) {
+        if (!pane[i].devlist && !pane[i].found) {    /* search hits stay in tree order */
             pane_sort(&pane[i], sortmode);
             drawrows(i);
         }
@@ -770,6 +868,8 @@ static void menupick(UWORD code, BOOL *quit)
             if (n == 0)
                 about_show(win, &topaz8);
             else if (n == 1)
+                reloadprefs();
+            else if (n == 2)
                 loadpane(active);
             else
                 *quit = TRUE;
@@ -820,10 +920,7 @@ static void reloadkeep(int i)
     name[0] = 0;
     if (cur >= 0 && cur < p->count)
         scopy(name, p->e[cur].name, FNAME);
-    if (p->devlist || !p->path[0])
-        pane_devlist(p);
-    else
-        pane_read(p, sortmode, hideinfo);
+    readpane(i);
     for (k = 0; k < p->count; k++)
         if (name[0] && !nocase_cmp(p->e[k].name, name))
             break;
@@ -937,6 +1034,12 @@ static BOOL picked(struct Pane *p, int k)
     int j;
     if (p->nsel ? !p->e[k].sel : k != p->cur)
         return FALSE;
+    if (p->found && p->nsel && ops_isicon(p->e[k].name, base, FNAME)) {
+        for (j = 0; j < p->count; j++)          /* the same drawer, too */
+            if (p->e[j].sel && p->e[j].aux == p->e[k].aux && !nocase_cmp(p->e[j].name, base))
+                return FALSE;
+        return TRUE;
+    }
     if (p->nsel && ops_isicon(p->e[k].name, base, FNAME))
         for (j = 0; j < p->count; j++)
             if (p->e[j].sel && !nocase_cmp(p->e[j].name, base))
@@ -967,7 +1070,7 @@ static void opsummary(int op, const struct OpsStats *st)
 
 static void renameop(struct Pane *p)
 {
-    char name[FNAME], prompt[64];
+    char name[FNAME], prompt[64], dir[PATHMAX];
     int k, done = 0;
     LONG err;
     for (k = 0; k < p->count; k++) {
@@ -984,7 +1087,8 @@ static void renameop(struct Pane *p)
             if (!name[0] || *x == *y)       /* empty or unchanged (a case change is a rename) */
                 continue;
         }
-        if ((err = ops_rename(p->path, p->e[k].name, name))) {
+        pane_entrydir(p, &p->e[k], dir);
+        if ((err = ops_rename(dir, p->e[k].name, name))) {
             char body[160];
             fmt(body, "Cannot rename \"%s\":\n%s.", p->e[k].name, dos_errstr(err));
             req_choose(win, &topaz8, "Oasis", body, "OK");
@@ -1035,6 +1139,10 @@ static void fileop(int b)
         return;
     }
     if (b == B_MAKEDIR) {
+        if (s->found) {
+            message("This pane shows search results: open a drawer first.");
+            return;
+        }
         makedirop(s);
         goto done;
     }
@@ -1060,16 +1168,30 @@ static void fileop(int b)
     }
     op = b == B_COPY ? OP_COPY : b == B_MOVE ? OP_MOVE : OP_DELETE;
     if (op != OP_DELETE) {
-        if (d->devlist || d->err[0]) {
+        if (d->devlist || d->err[0] || d->found) {
             message("Open the destination drawer in the other pane first.");
             return;
         }
-        if (ops_samedir(s->path, d->path)) {
+        if (!s->found && ops_samedir(s->path, d->path)) {
             message("Both panes show the same drawer: pick another destination.");
             return;
         }
+        if (s->found)
+            for (k = 0; k < s->count; k++) {
+                char dir[PATHMAX];
+                if (!picked(s, k))
+                    continue;
+                pane_entrydir(s, &s->e[k], dir);
+                if (ops_samedir(dir, d->path)) {
+                    fmt(body, "\"%s\" is already in the destination drawer.", s->e[k].name);
+                    message(body);
+                    return;
+                }
+            }
     } else {
         tail(where, s->path, 50);
+        if (s->found)
+            scat(where, " (search results)", sizeof(where));
         fmt(body, "Delete %ld file%s and %ld drawer%s from\n%s ?%s", (LONG)files,
             files == 1 ? "" : "s", (LONG)dirs, dirs == 1 ? "" : "s", where,
             dirs ? "\n\nDrawers are deleted with everything in them." : "");
@@ -1083,14 +1205,16 @@ static void fileop(int b)
     job.shown[0] = 0;
     ops_begin(&h, &st);
     for (k = 0; k < s->count && !st.aborted; k++) {
+        char dir[PATHMAX];
         if (!picked(s, k))
             continue;
+        pane_entrydir(s, &s->e[k], dir);
         if (op == OP_COPY)
-            ops_copy(s->path, s->e[k].name, d->path);
+            ops_copy(dir, s->e[k].name, d->path);
         else if (op == OP_MOVE)
-            ops_move(s->path, s->e[k].name, d->path);
+            ops_move(dir, s->e[k].name, d->path);
         else
-            ops_delete(s->path, s->e[k].name);
+            ops_delete(dir, s->e[k].name);
     }
     ops_end();
     flushinput(NULL);
@@ -1112,6 +1236,405 @@ done:
         job.resized = FALSE;
         resized();
     }
+}
+
+
+/* ---- tools ----------------------------------------------------------------------------------- */
+
+static BOOL t_poll(void *ctx, const char *drawer)
+{
+    BOOL stop = FALSE;
+    char line[96], t[52];
+    int n = (XR - X0 + 1) / 8;
+    if (!job.resized) {
+        tail(t, drawer, 46);
+        fmt(line, "%s %s   (Esc stops)", (const char *)ctx, t);
+        textpad(X0, yInfo, HI, BG, line, n);
+    }
+    flushinput(&stop);
+    return !stop;
+}
+
+static int nhits;
+static BOOL searchStopped;
+static struct Pane *hitpane;
+#define MAXHITS 2000
+
+static BOOL t_hit(void *ctx, const char *reldir, const struct FileInfoBlock *fib)
+{
+    struct Pane *p = hitpane;
+    if (hideinfo && ends_with_nocase((char *)fib->fib_FileName, ".info"))
+        return TRUE;
+    if (!pane_addhit(p, reldir, fib) || ++nhits >= MAXHITS)
+        return FALSE;
+    return TRUE;
+}
+
+/* fill pane i with the entries below its path that match its pattern */
+static void dosearch(int i)
+{
+    struct Pane *p = &pane[i];
+    char pat[64];
+    ULONG bad = 0;
+    BOOL stopped = FALSE;
+    LONG err;
+    scopy(pat, p->pattern, sizeof(pat));
+    pane_beginfound(p, pat);
+    nhits = 0;
+    hitpane = p;
+    err = tools_search(p->path, pat, t_hit, t_poll, (void *)"Searching", &bad, &stopped);
+    if (err) {
+        scopy(p->err, dos_errstr(err), sizeof(p->err));
+        p->found = FALSE;
+    } else if (!p->count)
+        scopy(p->err, stopped ? "Search stopped" : "Nothing found", sizeof(p->err));
+    searchStopped = stopped && p->count < MAXHITS;
+}
+
+static void searchop(struct Pane *p)
+{
+    static char pat[64];
+    char prompt[80], d[36];
+    tail(d, p->path, 34);
+    fmt(prompt, "Find in %s (#? ? * or part of a name):", d);
+    if (!req_string(win, &topaz8, "Search", prompt, pat, sizeof(pat)) || !pat[0]) {
+        flushinput(NULL);
+        return;
+    }
+    scopy(p->pattern, pat, sizeof(p->pattern));
+    p->found = TRUE;
+    flushinput(NULL);
+    loadpane(active);
+    if (p->found && p->count) {
+        char line[96];
+        if (p->count >= MAXHITS)
+            fmt(line, "More than %ld found: showing the first %ld.", (LONG)MAXHITS, (LONG)MAXHITS);
+        else
+            fmt(line, "%ld found%s. Double-click one to go there; Parent goes back.", (LONG)p->count,
+                searchStopped ? " before you stopped" : "");
+        message(line);
+    }
+}
+
+static void sizeop(struct Pane *p)
+{
+    struct SizeStats total = { 0 }, st;
+    char line[128], full[PATHMAX], b[16];
+    int k, nd = 0;
+    BOOL any = FALSE;
+    for (k = 0; k < p->count && !total.aborted; k++) {
+        struct FEntry *e = &p->e[k];
+        struct SizeStats z = { 0 };
+        if (p->nsel ? !e->sel : k != p->cur)
+            continue;
+        any = TRUE;
+        st = z;
+        pane_entrydir(p, e, full);
+        path_add(full, e->name);
+        if (tools_size(full, &st, t_poll, (void *)"Adding up") == 0 && e->kind == EK_DIR) {
+            if (!st.aborted) {
+                if (e->sel && e->sized)
+                    p->selbytes -= e->size;
+                e->size = st.bytes;
+                e->sized = 1;
+                if (e->sel)
+                    p->selbytes += e->size;
+            }
+            nd++;
+        }
+        total.files += st.files;
+        total.dirs += st.dirs;
+        total.bytes += st.bytes;
+        total.blocks += st.blocks;
+        total.unreadable += st.unreadable;
+        total.aborted |= st.aborted;
+    }
+    if (!any) {
+        message("Select something first (click it, or Space).");
+        return;
+    }
+    flushinput(NULL);
+    drawpane(active);
+    sizestr(b, (LONG)total.bytes);
+    fmt(line, "%ld files in %ld drawers: %s bytes, %ld blocks%s%s", total.files, total.dirs + nd, b,
+        total.blocks, total.unreadable ? " (some unreadable)" : "", total.aborted ? " - stopped" : ".");
+    message(line);
+}
+
+static void protectop(struct Pane *p)
+{
+    BOOL on[8];
+    char prompt[64], full[PATHMAX], body[160];
+    int k, n = 0, first = -1, done = 0, i;
+    LONG prot;
+    for (k = 0; k < p->count; k++)
+        if (p->nsel ? p->e[k].sel : k == p->cur) {
+            if (first < 0)
+                first = k;
+            n++;
+        }
+    if (first < 0) {
+        message("Select something first (click it, or Space).");
+        return;
+    }
+    for (i = 0; i < 8; i++)
+        on[i] = tools_protbit(p->e[first].prot, i);
+    if (n == 1)
+        fmt(prompt, "Protection of \"%s\":", p->e[first].name);
+    else
+        fmt(prompt, "Protection for %ld entries:", (LONG)n);
+    if (!req_protect(win, &topaz8, "Protect", prompt, on)) {
+        flushinput(NULL);
+        return;
+    }
+    for (k = 0; k < p->count; k++) {
+        if (!(p->nsel ? p->e[k].sel : k == p->cur))
+            continue;
+        prot = p->e[k].prot;
+        for (i = 0; i < 8; i++)
+            prot = tools_setprotbit(prot, i, on[i]);
+        pane_entrydir(p, &p->e[k], full);
+        path_add(full, p->e[k].name);
+        if (SetProtection((STRPTR)full, prot)) {
+            p->e[k].prot = prot;
+            done++;
+        } else {
+            fmt(body, "Cannot set the protection of\n\"%s\":\n%s.", p->e[k].name, dos_errstr(IoErr()));
+            if (req_choose(win, &topaz8, "Oasis", body, "Go on|Stop") == 1)
+                break;
+        }
+    }
+    flushinput(NULL);
+    drawpane(active);
+    fmt(body, "Protection set on %ld.", (LONG)done);
+    message(body);
+}
+
+static void commentop(struct Pane *p)
+{
+    static char text[80];
+    char prompt[64], full[PATHMAX], body[160];
+    int k, n = 0, first = -1, done = 0;
+    for (k = 0; k < p->count; k++)
+        if (p->nsel ? p->e[k].sel : k == p->cur) {
+            if (first < 0)
+                first = k;
+            n++;
+        }
+    if (first < 0) {
+        message("Select something first (click it, or Space).");
+        return;
+    }
+    getcomment(p, &p->e[first], text, sizeof(text));
+    if (n == 1)
+        fmt(prompt, "Comment for \"%s\":", p->e[first].name);
+    else
+        fmt(prompt, "Comment for %ld entries:", (LONG)n);
+    if (!req_string(win, &topaz8, "Comment", prompt, text, 80)) {
+        flushinput(NULL);
+        return;
+    }
+    for (k = 0; k < p->count; k++) {
+        if (!(p->nsel ? p->e[k].sel : k == p->cur))
+            continue;
+        pane_entrydir(p, &p->e[k], full);
+        path_add(full, p->e[k].name);
+        if (SetComment((STRPTR)full, (STRPTR)text))
+            done++;
+        else {
+            fmt(body, "Cannot set the comment of\n\"%s\":\n%s.", p->e[k].name, dos_errstr(IoErr()));
+            if (req_choose(win, &topaz8, "Oasis", body, "Go on|Stop") == 1)
+                break;
+        }
+    }
+    flushinput(NULL);
+    fmt(body, text[0] ? "Comment set on %ld." : "Comment removed from %ld.", (LONG)done);
+    infoIsMsg = FALSE;
+    drawinfo();
+    if (n > 1 || !done)
+        message(body);
+}
+
+static void compareop(void)
+{
+    struct CmpStats st;
+    char line[128];
+    int i;
+    for (i = 0; i < 2; i++)
+        if (pane[i].devlist || pane[i].found || pane[i].err[0]) {
+            message("Compare needs a drawer open in each pane.");
+            return;
+        }
+    if (ops_samedir(pane[0].path, pane[1].path)) {
+        message("Both panes show the same drawer.");
+        return;
+    }
+    tools_compare(&pane[0], &pane[1], &st);
+    drawpane(0);
+    drawpane(1);
+    if (!st.onlyA && !st.onlyB && !st.differ)
+        fmt(line, "The drawers match: %ld the same (by name, size and date).", (LONG)st.same);
+    else
+        fmt(line, "Selected: %ld only on the left, %ld only on the right, %ld differ. %ld the same.",
+            (LONG)st.onlyA, (LONG)st.onlyB, (LONG)st.differ, (LONG)st.same);
+    message(line);
+}
+
+static void toolop(int b)
+{
+    struct Pane *s = &pane[active];
+    if (b == B_COMPARE) {
+        compareop();
+        goto done;
+    }
+    if (s->devlist || (s->err[0] && !s->found)) {
+        message("Open a drawer first.");
+        return;
+    }
+    switch (b) {
+    case B_PROTECT: protectop(s); break;
+    case B_COMMENT: commentop(s); break;
+    case B_SIZE:    sizeop(s); break;
+    case B_SEARCH:  searchop(s); break;
+    }
+done:
+    flushinput(NULL);
+    if (job.resized) {
+        job.resized = FALSE;
+        resized();
+    }
+}
+
+/* ---- custom buttons (S:Oasis.prefs) ----------------------------------------------------------- */
+
+static void runbutton(int i)
+{
+    static char cmd[1024], con[96];
+    struct PrefButton *pb = &prefs.b[i];
+    struct Pane *s = &pane[active], *d = &pane[1 - active];
+    char **files = NULL, *paths = NULL;
+    int k, n = 0, r;
+    BPTR out, dir = 0, old = 0;
+    BOOL ok;
+    if (!s->devlist)
+        for (k = 0; k < s->count; k++)
+            if (s->nsel ? s->e[k].sel : k == s->cur)
+                n++;
+    if (n && (!(files = AllocMem(n * sizeof(char *), MEMF_PUBLIC)) ||
+              !(paths = AllocMem(n * PATHMAX, MEMF_PUBLIC)))) {
+        if (files)
+            FreeMem(files, n * sizeof(char *));
+        message("Not enough memory.");
+        return;
+    }
+    for (k = 0, r = 0; r < n; k++)
+        if (s->nsel ? s->e[k].sel : k == s->cur) {
+            files[r] = paths + r * PATHMAX;
+            pane_entrydir(s, &s->e[k], files[r]);
+            path_add(files[r], s->e[k].name);
+            r++;
+        }
+    r = prefs_expand(pb->cmd, s->devlist ? "" : s->path, d->devlist ? "" : d->path, files, n, cmd, sizeof(cmd));
+    if (n) {
+        FreeMem(files, n * sizeof(char *));
+        FreeMem(paths, n * PATHMAX);
+    }
+    if (r) {
+        fmt(con, r == 1 ? "Select the files for \"%s\" first." : "Too many files for \"%s\": select fewer.",
+            pb->label);
+        message(con);
+        return;
+    }
+    if (pb->quiet)
+        out = Open((STRPTR)"NIL:", MODE_NEWFILE);
+    else {
+        struct Screen *scr = win->WScreen;
+        fmt(con, "CON:0/%ld/%ld/%ld/Oasis: %s", (LONG)(scr->Height > 200 ? 40 : 11),
+            (LONG)scr->Width, (LONG)(scr->Height > 200 ? 160 : 120), pb->label);
+        out = Open((STRPTR)con, MODE_NEWFILE);
+    }
+    if (!out) {
+        message("Cannot open a window for the command's output.");
+        return;
+    }
+    if (!pb->quiet) {
+        Write(out, (APTR)"> ", 2);
+        Write(out, cmd, slen(cmd));
+    }
+    message("Running the command...");
+    if (!s->devlist && !s->found && (dir = Lock((STRPTR)s->path, ACCESS_READ)))
+        old = CurrentDir(dir);
+    else if (s->found && (dir = Lock((STRPTR)s->path, ACCESS_READ)))
+        old = CurrentDir(dir);
+    ok = Execute((STRPTR)cmd, 0, out);
+    if (dir) {
+        CurrentDir(old);
+        UnLock(dir);
+    }
+    if (!pb->quiet) {
+        static const char bye[] = "\nPress Return to close this window. ";
+        static const char nogo[] = "Could not run the command (1.3 needs C:Run for this).\n";
+        char c;
+        if (!ok)
+            Write(out, (APTR)nogo, sizeof(nogo) - 1);
+        Write(out, (APTR)bye, sizeof(bye) - 1);
+        Read(out, &c, 1);
+    }
+    Close(out);
+    flushinput(NULL);
+    for (k = 0; k < 2; k++)            /* the command may have changed files */
+        if (!pane[k].devlist)
+            reloadkeep(k);
+    if (job.resized) {
+        job.resized = FALSE;
+        resized();
+    }
+    fmt(con, ok ? "Done: %s." : "Could not run \"%s\".", pb->label);
+    message(con);
+}
+
+/* S:Oasis.prefs, or else Oasis.prefs in the current directory (Oasis's own drawer when it is
+   started from Workbench): a copy of Oasis can carry its prefs with it */
+static const char *prefsfile;
+
+static BOOL loadprefs(void)
+{
+    static const char *const where[] = { PREFS_FILE, PREFS_LOCAL };
+    int i;
+    for (i = 0; i < 2; i++)
+        if (prefs_load(where[i], &prefs)) {
+            prefsfile = where[i];
+            return TRUE;
+        }
+    prefsfile = PREFS_FILE;
+    return FALSE;
+}
+
+static void reloadprefs(void)
+{
+    char line[96];
+    BOOL there;
+    removegadgets();
+    there = loadprefs();
+    if (prefs.hassort)
+        sortmode = prefs.sort;
+    if (prefs.hashide)
+        hideinfo = prefs.hideinfo;
+    layout();
+    addgadgets();
+    resized();                          /* clears the window, draws everything in its new place */
+    loadpane(0);
+    loadpane(1);
+    syncmenus();
+    if (!there)
+        fmt(line, "No %s (or %s here): no custom buttons.", PREFS_FILE, PREFS_LOCAL);
+    else if (prefs.nbad)
+        fmt(line, "%s: line %ld not understood (%ld buttons).", prefsfile, (LONG)prefs.badline,
+            (LONG)prefs.nbuttons);
+    else
+        fmt(line, "%s read: %ld custom button%s.", prefsfile, (LONG)prefs.nbuttons,
+            prefs.nbuttons == 1 ? "" : "s");
+    message(line);
 }
 
 static void gadgetup(struct Gadget *g)
@@ -1142,12 +1665,16 @@ static void gadgetup(struct Gadget *g)
             break;
         case NAV_RESCAN: loadpane(active); break;
         }
-    } else if (id >= GID_BANK && id < GID_BANK + NBANK) {
+    } else if (id >= GID_CUSTOM && id < GID_CUSTOM + MAXBUTTONS)
+        runbutton(id - GID_CUSTOM);
+    else if (id >= GID_BANK && id < GID_BANK + NBANK) {
         int b = id - GID_BANK;
         if (!bank[b].on)
             return;
         if (b <= B_MAKEDIR)
             fileop(b);
+        else if (b <= B_SIZE || b == B_SEARCH || b == B_COMPARE)
+            toolop(b);
         else if (b == B_ALL)
             selectall(TRUE);
         else if (b == B_NONE)
@@ -1215,13 +1742,22 @@ BOOL ui_open(const char *left, const char *right)
     if ((font = OpenFont(&topaz8)))
         SetFont(rp, font);
     dos_setwindow(win);              /* "insert disk" requesters appear on our screen */
+    loadprefs();
+    if (prefs.hassort)
+        sortmode = prefs.sort;
+    if (prefs.hashide)
+        hideinfo = prefs.hideinfo;
+    if (!left)
+        left = prefs.hasleft ? prefs.left : "SYS:";
+    if (!right)
+        right = prefs.hasright ? prefs.right : "";
     initmenus();
     syncmenus();
     layout();
     scanquick();
     addgadgets();
-    scopy(pane[0].path, left ? left : "", PATHMAX);
-    scopy(pane[1].path, right ? right : "", PATHMAX);
+    scopy(pane[0].path, left, PATHMAX);
+    scopy(pane[1].path, right, PATHMAX);
     pane[0].devlist = !pane[0].path[0];
     pane[1].devlist = !pane[1].path[0];
     redrawall();
@@ -1246,6 +1782,15 @@ BOOL ui_open(const char *left, const char *right)
             u_error(NULL, "Cannot delete", "Work:ot/src/locked.txt", ERROR_DELETE_PROTECTED);
         else if (TEST_REQ == 2)
             req_string(win, &topaz8, "Rename", "New name for \"readme.txt\":", nm, 31);
+        else if (TEST_REQ == 4) {
+            BOOL on[8] = { 0, 1, 0, 0, 1, 1, 0, 1 };
+            req_protect(win, &topaz8, "Protect", "Protection of \"tool\":", on);
+        } else if (TEST_REQ == 5) {      /* search results in the left pane */
+            scopy(pane[0].pattern, "#?.txt", sizeof(pane[0].pattern));
+            pane[0].found = TRUE;
+            loadpane(0);
+        } else if (TEST_REQ == 6)        /* compare the two panes */
+            compareop();
         else
             req_choose(win, &topaz8, "Delete", "Delete 4 files and 1 drawer from\nWork:ot/src ?\n\n"
                        "Drawers are deleted with everything in them.", "Delete|Cancel");
