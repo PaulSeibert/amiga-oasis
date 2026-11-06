@@ -15,7 +15,7 @@ struct IntuitionBase *IntuitionBase;
 struct GfxBase *GfxBase;
 
 static const char version[] __attribute__((used)) =
-    "$VER: Oasis 1.0 (4.11.2026) (c) 2026 Desert Palms Software, by Paul Seibert. Freeware.";
+    "$VER: Oasis 1.0 (6.11.2026) (c) 2026 Desert Palms Software, by Paul Seibert. Freeware.";
 
 int main(int argc, char **argv)
 {

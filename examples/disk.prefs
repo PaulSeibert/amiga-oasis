@@ -1,0 +1,4 @@
+; Oasis prefs on the Oasis boot disk (S:Oasis.prefs). See Oasis.prefs in the Oasis drawer
+; for every setting, with custom button examples. After editing: Project > Reload prefs.
+SORT NAME
+HIDEICONS NO

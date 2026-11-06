@@ -1,0 +1,166 @@
+Short:        Two-pane file manager for Kickstart 1.3 and up
+Author:       Paul Seibert (Desert Palms Software)
+Uploader:     Paul Seibert <your@email.here>
+Type:         util/dir
+Version:      1.0
+Architecture: m68k-amigaos >= 1.3
+Distribution: Aminet
+Requires:     Nothing extra. Optional: LhA (for extracting and packing).
+
+Oasis 1.0 - (c) 2026 Desert Palms Software. Written by Paul Seibert.
+Freeware.
+
+Oasis is a two-pane file manager in the classic style: a source pane and a
+destination pane side by side, a bank of buttons below, and everything
+done from one window. It is written in C for AmigaOS 1.3 (V33) and runs
+unchanged on 2.x and 3.x. It only uses the 1.3 operating system, so it
+works on a stock A500 with 512K as well as on bigger machines, and it
+looks at home on both the 1.3 and the 2.0+ Workbench.
+
+Besides copying files, Oasis looks at them (text, hex, IFF pictures and
+sounds), looks inside LhA archives without needing LhA, and turns floppy
+disks into ADF images and back.
+
+Browsing
+--------
+
+ * Two panes, each with a path field, a scroller and a status line (files,
+   drawers, selection size, free space). The active pane has the orange
+   frame; Tab switches. The info line shows the entry under the cursor:
+   what kind of file it is, size, date, protection bits and comment.
+ * Drive buttons for the drives you have, plus Devs (all devices, volumes
+   and assigns), Parent, Root and Rescan. Disk changes are noticed.
+ * Click to select, double-click or Return to open. Cursor keys, Shift for
+   a page, Space selects, Backspace goes up, Del deletes.
+ * Sort by name, size or date (drawers first); hide .info files.
+
+File operations
+---------------
+
+ * Copy, Move, Rename, Delete, MakeDir. Copy and Delete work through whole
+   drawers. Icons travel with their files: copying "foo" copies "foo.info".
+ * Comments, protection bits and dates are kept. Dates are kept on 1.3 too
+   (Oasis sets them with a DOS packet, as 1.3 has no SetFileDate).
+ * Moves on the same disk are renames; across disks Oasis copies, then
+   deletes the original only if everything arrived.
+ * A progress bar, and Esc stops cleanly (never half a file left).
+ * Clear requesters: Retry / Skip / Skip all / Abort, Replace / Replace all,
+   Unprotect for delete-protected files. Deleting always asks first.
+   Copying a drawer into itself is refused.
+
+Tools
+-----
+
+ * Protect: the eight hsparwed bits as toggle buttons.
+ * Comment: edit a file comment.
+ * Size: adds up drawers; their size then shows in the list.
+ * Search: by name below the current drawer, with AmigaDOS wildcards
+   (#?  ?  *  (a|b)) or just part of a name. The results fill the pane;
+   copy or delete them directly, or double-click one to go there.
+ * Compare: selects what is only on one side, or differs in size or date.
+ * Custom buttons: up to 12, defined in a plain text file, with the
+   selected files (%s, %f), this drawer (%p) and the other pane (%d).
+
+Viewers
+-------
+
+ * Text viewer: long lines wrap, tabs line up, ANSI colour codes in
+   readmes are hidden. Tab switches to hex.
+ * Hex viewer: any size of file.
+ * IFF ILBM pictures on their own screen: lores and hires, interlace, up
+   to 32 colours, Extra Halfbrite and HAM. Click to return.
+ * IFF 8SVX sounds, plain or Fibonacci-packed, mono or stereo, played
+   through audio.device with little chip RAM. Esc stops.
+
+LhA archives
+------------
+
+ * Return on an .lha shows what is in it: sizes, packing, dates, drawers
+   and file comments. This is built into Oasis and works without LhA.
+ * The LhA button extracts archives into the other pane, or packs the
+   selection (with its icons) into a new archive there. This runs the LhA
+   program, which is shareware and not included: put it in C:, or name it
+   in the prefs file.
+
+ADF disk images
+---------------
+
+ * Write an .adf onto a floppy in DF0:-DF3:, with or without verifying
+   each track. Oasis names the disk it is about to replace and asks first.
+ * Read a floppy into a new .adf in the other pane. Unreadable tracks are
+   saved as zeros and reported.
+ * Write-protected disks, empty drives, images of the wrong size, and
+   images on the disk being imaged are refused. Esc stops between tracks.
+ * 880K (DD) disks only.
+
+Installing
+----------
+
+Copy the Oasis drawer anywhere you like. Oasis needs no libraries, fonts
+or assigns beyond the ROM. Its settings live in S:Oasis.prefs, or in
+Oasis.prefs next to Oasis: an example is in the drawer, with comments
+explaining every line. Project > Reload prefs applies changes.
+
+On Kickstart 1.3, custom buttons and LhA need C:Run, which every
+Workbench disk has.
+
+There is also a disk image, oasis.adf, on the GitHub page: it boots
+straight into Oasis.
+
+Command mode
+------------
+
+"oasis CMD" runs Oasis's engine from the CLI or a script, without the
+window: LIST, TREE, COPY, MOVE, DELETE, MAKEDIR, RENAME, SIZE, SEARCH,
+PROTECT, COMMENT, COMPARE, TYPE, LHALIST, ADFREAD, ADFWRITE and more.
+"oasis CMD" alone lists them all. For example:
+
+    oasis CMD COPY Work:Projects TO DF1:
+    oasis CMD SEARCH Work: #?.mod
+    oasis CMD ADFWRITE RAM:game.adf DF0: VERIFY
+
+Known limits
+------------
+
+ * ADF imaging is for 880K DD floppies (HD disks need OS 2.0 or later).
+ * 8SVX: plain and Fibonacci-delta samples (the common kinds).
+ * ILBM: what the original chipset shows (up to 64 colours with EHB, or
+   HAM6); AGA pictures are recognised but not shown.
+ * Extracting and packing need the LhA program.
+
+Technical notes
+---------------
+
+ * Written in C, cross-compiled with GCC 6.5 (bebbo's amiga-gcc) against
+   the Kickstart 1.3 includes, so it cannot call anything newer by
+   accident. About 100K of 68000 code.
+ * The interface is built by hand from plain Intuition gadgets (1.3 has
+   no GadTools or ASL), with its own requesters.
+ * Tested under WinUAE on Kickstart 1.3 (A500, OCS, 512K + 512K) and
+   Kickstart 3.1 (ECS, 1MB + 1MB) with automated test disks: copies are
+   compared byte for byte, dates and protection bits checked, decoded
+   pictures checked against their source, sound playing times measured,
+   ADF images written and read back byte for byte, and free memory
+   measured before and after. No memory is lost.
+
+History
+-------
+
+ 1.0 (6.11.2026)  First release.
+
+Copyright and distribution
+--------------------------
+
+Oasis is (c) 2026 Desert Palms Software, written by Paul Seibert.
+
+Oasis is freeware. You may use it for free and copy it freely, as long
+as the archive is passed on complete and unchanged and no money is
+charged for it beyond the cost of the media. It may be put on Aminet,
+cover disks and CD-ROM collections.
+
+Oasis is provided "as is", without warranty of any kind. Use it at your
+own risk, and keep copies of disks that matter before writing images.
+
+Source code: https://github.com/PaulSeibert/amiga-oasis
+
+Desert Palms Software makes new software for classic Amiga computers.
