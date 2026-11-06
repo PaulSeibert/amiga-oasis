@@ -22,6 +22,8 @@
 #include "dos13.h"
 #include "pane.h"
 #include "about.h"
+#include "ops.h"
+#include "req.h"
 #include "ui.h"
 
 extern struct GfxBase *GfxBase;
@@ -87,6 +89,8 @@ static BOOL infoIsMsg;
 /* double-click tracking */
 static ULONG clickSecs, clickMicros;
 static int clickPane = -1, clickRow = -1;
+
+static void fileop(int b);
 
 /* layout */
 static int X0, XR, yPath, yBar, listT, listB, rows, yStat, yInfo, yBank;
@@ -329,7 +333,7 @@ static void addgadgets(void)
     bw = (XR - X0 + 1 - 7 * BGAP) / 8;
     for (i = 0; i < NBANK; i++) {
         int r = i / 8, c = i % 8;
-        BOOL on = (i == B_ALL || i == B_NONE);      /* the rest arrive in later milestones */
+        BOOL on = (i <= B_MAKEDIR || i == B_ALL || i == B_NONE);  /* the rest: later milestones */
         initbtn(&bank[i], GID_BANK + i, bankLabel[i], X0 + c * (bw + BGAP),
                 yBank + r * (BTN_H + BGAP), bw, TRUE, on);
         AddGadget(win, &bank[i].g, (UWORD)~0);
@@ -454,7 +458,8 @@ static void drawstatus(int i)
     } else {
         sizestr(a, p->bytes);
         kbstr(b, p->freek);
-        fmt(line, "%ld files %ld drawers, %s free", (LONG)p->nfiles, (LONG)p->ndirs, b);
+        fmt(line, "%ld file%s %ld drawer%s, %s free", (LONG)p->nfiles, p->nfiles == 1 ? "" : "s",
+            (LONG)p->ndirs, p->ndirs == 1 ? "" : "s", b);
         (void)a;
     }
     textpad(paneX[i] + 3, yStat, i == active ? HI : FG, BG, line, (paneW - 6) / 8);
@@ -728,6 +733,7 @@ static void key(UWORD code, UWORD qual)
     case 0x44: case 0x43: open_entry(active, p->cur); break;                  /* Return, Enter */
     case 0x41: parent(active); break;                                         /* Backspace */
     case 0x42: setactive(1 - active); break;                                  /* Tab */
+    case 0x46: fileop(B_DELETE); break;                                       /* Del */
     case 0x40:                                                                /* Space */
         if (p->cur >= 0 && p->cur < p->count) {
             pane_select(p, p->cur, !p->e[p->cur].sel);
@@ -796,6 +802,318 @@ static void diskchange(void)
     }
 }
 
+
+/* ---- file operations ------------------------------------------------------------------------- */
+
+static struct {
+    int  op;
+    BOOL replaceAll, skipAll, resized;
+    char shown[32];
+} job;
+
+/* keep the user's place when a pane is read again */
+static void reloadkeep(int i)
+{
+    struct Pane *p = &pane[i];
+    char name[FNAME];
+    int top = p->top, cur = p->cur, k;
+    name[0] = 0;
+    if (cur >= 0 && cur < p->count)
+        scopy(name, p->e[cur].name, FNAME);
+    if (p->devlist || !p->path[0])
+        pane_devlist(p);
+    else
+        pane_read(p, sortmode, hideinfo);
+    for (k = 0; k < p->count; k++)
+        if (name[0] && !nocase_cmp(p->e[k].name, name))
+            break;
+    p->cur = k < p->count ? k : (cur < p->count ? cur : p->count - 1);
+    p->top = top;
+    clamptop(p);
+    showsel(p);
+    setpathgad(i);
+    drawpane(i);
+}
+
+/* answer what arrived while the window wasn't listening: clicks and keys made during an
+   operation or a dialog are dropped, so they can't start something unexpected */
+static void flushinput(BOOL *stop)
+{
+    struct IntuiMessage *im;
+    while ((im = (struct IntuiMessage *)GetMsg(win->UserPort))) {
+        ULONG class = im->Class;
+        UWORD code = im->Code;
+        ReplyMsg((struct Message *)im);
+        if (class == NEWSIZE)
+            job.resized = TRUE;
+        else if (class == REFRESHWINDOW) {
+            BeginRefresh(win);
+            EndRefresh(win, TRUE);
+        } else if (stop && ((class == RAWKEY && code == 0x45) || class == CLOSEWINDOW))
+            *stop = TRUE;                    /* Esc or the close gadget stops the operation */
+    }
+}
+
+static void tail(char *d, const char *path, int max)
+{
+    int n = slen(path);
+    if (n <= max)
+        scopy(d, path, max + 1);
+    else {
+        scopy(d, "...", max + 1);
+        scat(d, path + n - (max - 3), max + 1);
+    }
+}
+
+static BOOL u_progress(void *ctx, int op, const char *name, ULONG done, ULONG total)
+{
+    static const char *const verb[] = { "Copying", "Moving", "Deleting" };
+    BOOL stop = FALSE;
+    int n = (XR - X0 + 1) / 8, barw = 160, bx = XR - barw + 1;
+    if (job.resized)                         /* the layout is stale until the job ends */
+        goto poll;
+    if (nocase_cmp(job.shown, name)) {
+        char line[96];
+        scopy(job.shown, name, sizeof(job.shown));
+        fmt(line, "%s %s   (Esc stops)", verb[op], name);
+        textpad(X0, yInfo, HI, BG, line, n - (total ? barw / 8 + 1 : 0));
+        if (!total)
+            fill(bx, yInfo, XR, yInfo + 7, BG);
+    }
+    if (total) {
+        int w = (int)((done >> 4) * (barw - 2) / ((total >> 4) ? (total >> 4) : 1));
+        if (w > barw - 2)
+            w = barw - 2;
+        box(bx, yInfo, XR, yInfo + 7, FG);
+        fill(bx + 1, yInfo + 1, bx + w, yInfo + 6, HI);
+        fill(bx + 1 + w, yInfo + 1, XR - 1, yInfo + 6, BG);
+    }
+poll:
+    flushinput(&stop);
+    return !stop;
+}
+
+static int u_error(void *ctx, const char *what, const char *path, LONG err)
+{
+    char body[200], p[52];
+    int a;
+    if (job.skipAll)
+        return ANS_SKIP;
+    tail(p, path, 50);
+    fmt(body, "%s\n%s\n\n%s.", what, p, dos_errstr(err));
+    if (err == ERROR_DELETE_PROTECTED) {
+        a = req_choose(win, &topaz8, "Oasis", body, "Unprotect|Skip|Skip all|Abort");
+        if (a == 0)
+            return ANS_FORCE;
+    } else {
+        a = req_choose(win, &topaz8, "Oasis", body, "Retry|Skip|Skip all|Abort");
+        if (a == 0)
+            return ANS_RETRY;
+    }
+    if (a == 2)
+        job.skipAll = TRUE;
+    return a == 3 ? ANS_ABORT : ANS_SKIP;
+}
+
+static int u_exists(void *ctx, const char *path)
+{
+    char body[200], p[52];
+    int a;
+    if (job.replaceAll)
+        return ANS_REPLACE;
+    tail(p, path, 50);
+    fmt(body, "This file already exists:\n%s\n\nReplace it?", p);
+    a = req_choose(win, &topaz8, "Oasis", body, "Replace|Replace all|Skip|Abort");
+    if (a == 1)
+        job.replaceAll = TRUE;
+    return a <= 1 ? ANS_REPLACE : a == 2 ? ANS_SKIP : ANS_ABORT;
+}
+
+/* the entries an operation works on: the selection, or the cursor entry when nothing is
+   selected; "foo.info" is left out when "foo" is in, because the icon travels with foo */
+static BOOL picked(struct Pane *p, int k)
+{
+    char base[FNAME];
+    int j;
+    if (p->nsel ? !p->e[k].sel : k != p->cur)
+        return FALSE;
+    if (p->nsel && ops_isicon(p->e[k].name, base, FNAME))
+        for (j = 0; j < p->count; j++)
+            if (p->e[j].sel && !nocase_cmp(p->e[j].name, base))
+                return FALSE;
+    return TRUE;
+}
+
+static void opsummary(int op, const struct OpsStats *st)
+{
+    static const char *const verb[] = { "Copied", "Moved", "Deleted" };
+    char line[128], b[16];
+    sizestr(b, (LONG)st->bytes);
+    if (op == OP_COPY)
+        fmt(line, "%s %ld files, %ld drawers, %s bytes", verb[op], st->files, st->dirs, b);
+    else
+        fmt(line, "%s %ld files, %ld drawers", verb[op], st->files, st->dirs);
+    if (st->skipped) {
+        fmt(b, ", %ld skipped", st->skipped);
+        scat(line, b, sizeof(line));
+    }
+    if (st->aborted)
+        scat(line, " - stopped", sizeof(line));
+    else if (op != OP_DELETE && st->datesFailed && !st->datesSet)
+        scat(line, " (this disk can't keep dates)", sizeof(line));
+    scat(line, ".", sizeof(line));
+    message(line);
+}
+
+static void renameop(struct Pane *p)
+{
+    char name[FNAME], prompt[64];
+    int k, done = 0;
+    LONG err;
+    for (k = 0; k < p->count; k++) {
+        if (!picked(p, k))
+            continue;
+        scopy(name, p->e[k].name, FNAME);
+        fmt(prompt, "New name for \"%s\":", p->e[k].name);
+        if (!req_string(win, &topaz8, "Rename", prompt, name, 31))
+            break;
+        {
+            const char *x = name, *y = p->e[k].name;
+            while (*x && *x == *y)
+                x++, y++;
+            if (!name[0] || *x == *y)       /* empty or unchanged (a case change is a rename) */
+                continue;
+        }
+        if ((err = ops_rename(p->path, p->e[k].name, name))) {
+            char body[160];
+            fmt(body, "Cannot rename \"%s\":\n%s.", p->e[k].name, dos_errstr(err));
+            req_choose(win, &topaz8, "Oasis", body, "OK");
+        } else
+            done++;
+    }
+    if (done) {
+        fmt(prompt, "Renamed %ld.", (LONG)done);
+        message(prompt);
+    }
+}
+
+static void makedirop(struct Pane *p)
+{
+    char name[FNAME] = "", prompt[80], d[40];
+    LONG err;
+    int k;
+    tail(d, p->path, 36);
+    fmt(prompt, "New drawer in %s", d);
+    if (!req_string(win, &topaz8, "Make drawer", prompt, name, 31) || !name[0])
+        return;
+    if ((err = ops_makedir(p->path, name))) {
+        char body[160];
+        fmt(body, "Cannot make drawer \"%s\":\n%s.", name, dos_errstr(err));
+        req_choose(win, &topaz8, "Oasis", body, "OK");
+        return;
+    }
+    flushinput(NULL);
+    reloadkeep(active);
+    for (k = 0; k < p->count; k++)             /* put the cursor on the new drawer */
+        if (!nocase_cmp(p->e[k].name, name)) {
+            movecursor(active, k);
+            break;
+        }
+    message("Drawer made.");
+}
+
+static void fileop(int b)
+{
+    struct Pane *s = &pane[active], *d = &pane[1 - active];
+    struct OpsHooks h = { NULL, u_progress, u_error, u_exists };
+    struct OpsStats st;
+    char body[200], where[52];
+    int k, n = 0, files = 0, dirs = 0, op;
+
+    if (s->devlist || s->err[0]) {
+        message("Open a drawer first.");
+        return;
+    }
+    if (b == B_MAKEDIR) {
+        makedirop(s);
+        goto done;
+    }
+    for (k = 0; k < s->count; k++)
+        if (picked(s, k)) {
+            n++;
+            if (s->e[k].kind == EK_DIR)
+                dirs++;
+            else
+                files++;
+        }
+    if (!n) {
+        message("Select something first (click it, or Space).");
+        return;
+    }
+    if (b == B_RENAME) {
+        renameop(s);
+        flushinput(NULL);
+        reloadkeep(active);
+        if (!d->devlist && ops_samedir(d->path, s->path))
+            reloadkeep(1 - active);
+        goto done;
+    }
+    op = b == B_COPY ? OP_COPY : b == B_MOVE ? OP_MOVE : OP_DELETE;
+    if (op != OP_DELETE) {
+        if (d->devlist || d->err[0]) {
+            message("Open the destination drawer in the other pane first.");
+            return;
+        }
+        if (ops_samedir(s->path, d->path)) {
+            message("Both panes show the same drawer: pick another destination.");
+            return;
+        }
+    } else {
+        tail(where, s->path, 50);
+        fmt(body, "Delete %ld file%s and %ld drawer%s from\n%s ?%s", (LONG)files,
+            files == 1 ? "" : "s", (LONG)dirs, dirs == 1 ? "" : "s", where,
+            dirs ? "\n\nDrawers are deleted with everything in them." : "");
+        if (req_choose(win, &topaz8, "Delete", body, "Delete|Cancel") != 0) {
+            flushinput(NULL);
+            return;
+        }
+    }
+    job.op = op;
+    job.replaceAll = job.skipAll = FALSE;
+    job.shown[0] = 0;
+    ops_begin(&h, &st);
+    for (k = 0; k < s->count && !st.aborted; k++) {
+        if (!picked(s, k))
+            continue;
+        if (op == OP_COPY)
+            ops_copy(s->path, s->e[k].name, d->path);
+        else if (op == OP_MOVE)
+            ops_move(s->path, s->e[k].name, d->path);
+        else
+            ops_delete(s->path, s->e[k].name);
+    }
+    ops_end();
+    flushinput(NULL);
+    if (job.resized) {
+        job.resized = FALSE;
+        resized();
+    }
+    if (op == OP_COPY) {
+        pane_selectall(s, FALSE);
+        drawpane(active);
+    } else
+        reloadkeep(active);
+    reloadkeep(1 - active);
+    opsummary(op, &st);
+    return;
+done:
+    flushinput(NULL);
+    if (job.resized) {
+        job.resized = FALSE;
+        resized();
+    }
+}
+
 static void gadgetup(struct Gadget *g)
 {
     int id = g->GadgetID;
@@ -828,7 +1146,9 @@ static void gadgetup(struct Gadget *g)
         int b = id - GID_BANK;
         if (!bank[b].on)
             return;
-        if (b == B_ALL)
+        if (b <= B_MAKEDIR)
+            fileop(b);
+        else if (b == B_ALL)
             selectall(TRUE);
         else if (b == B_NONE)
             selectall(FALSE);
@@ -915,6 +1235,22 @@ BOOL ui_open(const char *left, const char *right)
         if (dw > 0 || dh > 0)
             SizeWindow(win, dw > 0 ? dw : 0, dh > 0 ? dh : 0);
     }
+#ifdef TEST_REQ          /* screenshot builds: open one of the dialogs straight away */
+    {
+        char nm[32] = "readme.txt";
+        Delay(100);
+        flushinput(NULL);
+        if (job.resized)
+            resized();
+        if (TEST_REQ == 1)
+            u_error(NULL, "Cannot delete", "Work:ot/src/locked.txt", ERROR_DELETE_PROTECTED);
+        else if (TEST_REQ == 2)
+            req_string(win, &topaz8, "Rename", "New name for \"readme.txt\":", nm, 31);
+        else
+            req_choose(win, &topaz8, "Delete", "Delete 4 files and 1 drawer from\nWork:ot/src ?\n\n"
+                       "Drawers are deleted with everything in them.", "Delete|Cancel");
+    }
+#endif
     return TRUE;
 }
 

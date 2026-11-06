@@ -199,6 +199,84 @@ BOOL dos_space(BPTR lock, const char *path, ULONG *freek, char *volname)
     return ok;
 }
 
+/* ---- packets (1.3 has no DoPkt) --------------------------------------------------------- */
+
+LONG dos_packet(struct MsgPort *port, LONG type, LONG a1, LONG a2, LONG a3, LONG a4, LONG *res2)
+{
+    struct StandardPacket *sp = AllocMem(sizeof(*sp), MEMF_PUBLIC | MEMF_CLEAR);
+    struct MsgPort *rp = AllocMem(sizeof(*rp), MEMF_PUBLIC | MEMF_CLEAR);
+    BYTE sig = -1;
+    LONG res1 = 0;
+    *res2 = ERROR_NO_FREE_STORE;
+    if (sp && rp && (sig = AllocSignal(-1)) >= 0) {
+        struct List *l = &rp->mp_MsgList;
+        rp->mp_Node.ln_Type = NT_MSGPORT;
+        rp->mp_Flags = PA_SIGNAL;
+        rp->mp_SigBit = sig;
+        rp->mp_SigTask = FindTask(NULL);
+        l->lh_Head = (struct Node *)&l->lh_Tail;       /* NewList() without amiga.lib */
+        l->lh_Tail = NULL;
+        l->lh_TailPred = (struct Node *)&l->lh_Head;
+        sp->sp_Msg.mn_Node.ln_Name = (char *)&sp->sp_Pkt;
+        sp->sp_Msg.mn_ReplyPort = rp;
+        sp->sp_Pkt.dp_Link = &sp->sp_Msg;
+        sp->sp_Pkt.dp_Port = rp;
+        sp->sp_Pkt.dp_Type = type;
+        sp->sp_Pkt.dp_Arg1 = a1;
+        sp->sp_Pkt.dp_Arg2 = a2;
+        sp->sp_Pkt.dp_Arg3 = a3;
+        sp->sp_Pkt.dp_Arg4 = a4;
+        PutMsg(port, &sp->sp_Msg);
+        WaitPort(rp);
+        GetMsg(rp);
+        res1 = sp->sp_Pkt.dp_Res1;
+        *res2 = sp->sp_Pkt.dp_Res2;
+    }
+    if (sig >= 0)
+        FreeSignal(sig);
+    if (rp)
+        FreeMem(rp, sizeof(*rp));
+    if (sp)
+        FreeMem(sp, sizeof(*sp));
+    return res1;
+}
+
+LONG dos_setdate(const char *path, const struct DateStamp *ds)
+{
+    static char dir[PATHMAX];        /* static: called from deep in a recursive copy */
+    int i, cut = -1;
+    UBYTE *bname;
+    struct DateStamp *pds;
+    BPTR lock;
+    LONG err = 0, res2, n;
+
+    for (i = 0; path[i]; i++)
+        if (path[i] == ':' || path[i] == '/')
+            cut = i;
+    scopy(dir, path, PATHMAX);
+    dir[cut < 0 ? 0 : (path[cut] == ':' ? cut + 1 : cut)] = 0;   /* keep "DH0:", drop "/" */
+    n = slen(path + cut + 1);
+    if (n > 255)
+        return ERROR_INVALID_COMPONENT_NAME;
+    /* the name as a BSTR and the date, both in longword-aligned public memory */
+    bname = AllocMem(260 + sizeof(struct DateStamp), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!bname)
+        return ERROR_NO_FREE_STORE;
+    pds = (struct DateStamp *)(bname + 260);
+    bname[0] = (UBYTE)n;
+    CopyMem((APTR)(path + cut + 1), bname + 1, n);
+    *pds = *ds;
+    if ((lock = Lock((STRPTR)dir, ACCESS_READ))) {
+        struct FileLock *fl = BADDR(lock);
+        if (!dos_packet(fl->fl_Task, ACTION_SET_DATE, 0, lock, MKBADDR(bname), (LONG)pds, &res2))
+            err = res2 ? res2 : ERROR_ACTION_NOT_KNOWN;
+        UnLock(lock);
+    } else
+        err = IoErr();
+    FreeMem(bname, 260 + sizeof(struct DateStamp));
+    return err;
+}
+
 /* ---- paths ---------------------------------------------------------------------------- */
 
 void path_add(char *path, const char *name)

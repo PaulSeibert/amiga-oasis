@@ -29,4 +29,9 @@ BOOL path_parent(char *path);       /* FALSE when already at the root */
 void path_root(char *path);
 BOOL path_isroot(const char *path);
 
+/* send a DOS packet to a handler and wait for the reply: returns dp_Res1, *res2 = dp_Res2 */
+LONG dos_packet(struct MsgPort *port, LONG type, LONG a1, LONG a2, LONG a3, LONG a4, LONG *res2);
+/* set a file's date with ACTION_SET_DATE (1.3 has no SetFileDate): 0 or a DOS error */
+LONG dos_setdate(const char *path, const struct DateStamp *ds);
+
 #endif
